@@ -49,6 +49,10 @@ git -C "$WORKDIR" reset --hard HEAD >/dev/null
 
 # 3. 应用补丁
 cd "$WORKDIR"
+# 上次应用补丁留下的未跟踪新增文件会阻塞重新 apply;只清理补丁内 new file。
+awk '/^diff --git /{p=$4; sub(/^b\//,"",p)} /^new file mode/{print p}' "$PATCH_FILE" | while read -r f; do
+	rm -f "$f"
+done
 if ! git apply --check "$PATCH_FILE" >/dev/null 2>&1; then
   echo "[update] 错误:补丁无法应用到 $TAG(上游相关文件可能已变化)" >&2
   echo "[update] 请检查 $PATCH_FILE 与上游 $TAG 的差异后手动合并" >&2
