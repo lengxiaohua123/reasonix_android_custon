@@ -71,6 +71,7 @@ temp/
 # Termux update workflow outputs (see update-reasonix.sh)
 reasonix-test-*.log
 test-result.log
+report.log
 
 # Official theme art intermediate outputs / caches
 scripts/official-theme-art/out/
