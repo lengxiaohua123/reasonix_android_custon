@@ -50,12 +50,10 @@ if ! git apply --check "$PATCH_FILE" >/dev/null 2>&1; then
   exit 1
 fi
 git apply "$PATCH_FILE"
-log "补丁应用成功(9 个文件)"
+log "补丁应用成功($(grep -c '^diff --git' "$PATCH_FILE") 个文件)"
 
-# 4. 编译 android 版 reasonix
-mkdir -p bin
-CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -ldflags "-s -w" \
-  -o "bin/reasonix-android-arm64" ./cmd/reasonix
+# 4. 编译 android 版 reasonix(复用 Makefile 的 android target)
+make android
 log "编译完成: $WORKDIR/bin/reasonix-android-arm64"
 
 # 5. 运行测试并写日志
