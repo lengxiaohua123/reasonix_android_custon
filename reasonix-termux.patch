@@ -1,15 +1,18 @@
 diff --git a/Makefile b/Makefile
-index 3baf85e..ae24e38 100644
+index 1908482..7d85a54 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -6,13 +6,18 @@ LDFLAGS := -s -w \
+@@ -6,15 +6,21 @@ LDFLAGS := -s -w \
  	-X main.gitCommit=$(GIT_COMMIT) \
  	-X main.buildTimeUTC=$(BUILD_TIME_UTC)
  GOEXE := $(shell go env GOEXE)
 +ANDROID_ARCH ?= arm64
++
+ # One pin for the Makefile and the CI lint job; see .github/workflows/ci.yml.
+ GOLANGCI_VERSION := $(shell cat .golangci-version)
  
--.PHONY: build vet fmt lint lint-cross lint-update test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
-+.PHONY: build android vet fmt lint lint-cross lint-update test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
+-.PHONY: build vet fmt lint lint-go lint-install lint-cross lint-update test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
++.PHONY: build android vet fmt lint lint-go lint-install lint-cross lint-update test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
  
  build:
  	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/reasonix$(GOEXE) ./cmd/reasonix
@@ -23,10 +26,10 @@ index 3baf85e..ae24e38 100644
  	go vet ./...
  
 diff --git a/internal/cli/mcp_manager_actions.go b/internal/cli/mcp_manager_actions.go
-index 22aa359..7932556 100644
+index 0846a1a..69ff924 100644
 --- a/internal/cli/mcp_manager_actions.go
 +++ b/internal/cli/mcp_manager_actions.go
-@@ -366,6 +366,11 @@ func mcpOpenCommand(target string) (*exec.Cmd, error) {
+@@ -399,6 +399,11 @@ func mcpOpenCommand(target string) (*exec.Cmd, error) {
  		return exec.Command("open", target), nil
  	case "windows":
  		return exec.Command("rundll32", "url.dll,FileProtocolHandler", target), nil
@@ -124,7 +127,7 @@ index 5e9dd01..3419a75 100644
  	path = strings.TrimSpace(path)
  	if path == "" {
 diff --git a/internal/fileutil/atomicwrite.go b/internal/fileutil/atomicwrite.go
-index 6f55bfc..d19a679 100644
+index f9b59d7..0bac34a 100644
 --- a/internal/fileutil/atomicwrite.go
 +++ b/internal/fileutil/atomicwrite.go
 @@ -1,9 +1,11 @@
@@ -139,7 +142,7 @@ index 6f55bfc..d19a679 100644
  	"time"
  )
  
-@@ -57,7 +59,38 @@ func AtomicCreateFile(path string, data []byte, perm os.FileMode) error {
+@@ -70,7 +72,38 @@ func AtomicCreateFile(path string, data []byte, perm os.FileMode) error {
  	}
  	defer os.Remove(tmpPath)
  	if err := os.Link(tmpPath, path); err != nil {
