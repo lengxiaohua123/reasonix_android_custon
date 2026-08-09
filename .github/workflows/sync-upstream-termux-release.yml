@@ -1,14 +1,11 @@
 name: Sync upstream tag and release Termux build
 
-# GitHub Actions cannot listen to other repositories' tag events, so this
-# workflow polls the upstream (esengine/DeepSeek-Reasonix) latest tag on a
-# schedule and publishes a release only when it differs from the last one
-# (release tags are prefixed `termux-`, e.g. `termux-v1.21.3`).
+# GitHub Actions cannot listen to other repositories' tag events. This
+# workflow is now manual-only: it syncs this repo's master to the latest
+# upstream tag (Termux patch applied). Building and releasing are done
+# locally on Termux (see release-termux.sh + verify-and-release.yml).
 
 on:
-  schedule:
-    # Daily check; a full go test run keeps us inside the free Actions quota.
-    - cron: '0 4 * * *'
   workflow_dispatch: {}
 
 permissions:
@@ -59,25 +56,6 @@ jobs:
           git apply "$GITHUB_WORKSPACE/reasonix-termux.patch"
           echo "Patch applied: $(grep -c '^diff --git' "$GITHUB_WORKSPACE/reasonix-termux.patch") files"
 
-      - name: Build android binary
-        if: steps.check.outputs.skip == 'false'
-        working-directory: upstream
-        run: |
-          make android VERSION="${{ steps.upstream.outputs.tag }}"
-          ls -lh bin/
-
-      - name: Run tests
-        if: steps.check.outputs.skip == 'false'
-        working-directory: upstream
-        run: |
-          set +e
-          go test -count=1 ./... 2>&1 | tee test.log
-          status=${PIPESTATUS[0]}
-          set -e
-          # Fail the job when any package fails; otherwise a broken tree
-          # would still get synced and released.
-          test "$status" -eq 0
-
       - name: Sync sources back to this repo
         if: steps.check.outputs.skip == 'false'
         run: |
@@ -96,29 +74,3 @@ jobs:
               commit -m "sync upstream ${{ steps.upstream.outputs.tag }} (Termux patch applied)"
           git push origin master
           echo "Sources synced to master"
-
-      - name: Create release
-        if: steps.check.outputs.skip == 'false'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${{ steps.upstream.outputs.tag }}"
-          REL_TAG="termux-$TAG"
-          printf '%s\n' \
-            "Automatic Termux build of upstream [$TAG](https://github.com/esengine/DeepSeek-Reasonix/releases/tag/$TAG) with the Termux adaptation patch." \
-            "" \
-            "- **reasonix-android-arm64**: prebuilt binary (GOOS=android GOARCH=arm64, version $TAG)" \
-            "- **reasonix-termux.patch**: the adaptation patch (16 files)" \
-            "- **update-reasonix.sh**: rebuild/update script" \
-            "" \
-            "Install:" \
-            '```' \
-            "cp reasonix-android-arm64 \$PREFIX/bin/reasonix" \
-            "reasonix -v" \
-            '```' > notes.md
-          gh release create "$REL_TAG" \
-            "$GITHUB_WORKSPACE/upstream/bin/reasonix-android-arm64" \
-            "$GITHUB_WORKSPACE/reasonix-termux.patch" \
-            "$GITHUB_WORKSPACE/update-reasonix.sh" \
-            --title "Reasonix $TAG — Termux build" \
-            --notes-file notes.md

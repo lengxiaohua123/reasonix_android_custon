@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# release-termux.sh — 在 Termux 本地编译、测试 Reasonix,并把二进制发布到 GitHub release。
+# release-termux.sh — 在 Termux 本地编译、测试 Reasonix,并把编译好的二进制
+# 上传到本仓库 artifacts/(GitHub Action verify-and-release.yml 校验版本与
+# 上游最新 tag 一致后自动创建 release)。
 #
-# 前置:源码已就绪(先运行 ./update-reasonix.sh),gh 已认证,或设置 GITHUB_TOKEN
-# (Personal Access Token,需 repo 权限)。
+# 前置:源码已就绪(先运行 ./update-reasonix.sh),本仓库可 push(SSH key)。
 #
 # 用法:
 #   ./release-termux.sh [patch文件]
 # 环境变量:
-#   RELEASE_REPO      目标仓库(默认 lengxiaohua123/reasonix_android_custon)
 #   RELEASE_TAG       指定上游 tag(默认取上游最新正式版 tag)
 #   REASONIX_WORKDIR  源码工作目录(默认 $HOME/reasonix-src)
 #   SKIP_TESTS=1      跳过测试
@@ -65,72 +65,16 @@ if [ "${SKIP_TESTS:-0}" != "1" ]; then
   fi
 fi
 
-# 5. 发布
-log "发布到 $REPO"
-api_get() { curl -sS -H "Authorization: Bearer $GITHUB_TOKEN" "$@"; }
-
-release_exists() {
-  [ "$(api_get -o /dev/null -w '%{http_code}' "https://api.github.com/repos/$REPO/releases/tags/$REL_TAG")" = "200" ]
-}
-
-create_release_via_api() {
-  local notes escaped
-  notes="$(printf '%s\n' \
-    "Automatic Termux build of upstream [$TAG](https://github.com/esengine/DeepSeek-Reasonix/releases/tag/$TAG) with the Termux adaptation patch." \
-    "" \
-    "- **reasonix-android-arm64**: prebuilt binary built on Termux (GOOS=android GOARCH=arm64, version $TAG)" \
-    "- **reasonix-termux.patch**: the adaptation patch (16 files)" \
-    "- **update-reasonix.sh**: rebuild/update script" \
-    "" \
-    "Install:" \
-    '```' \
-    "cp reasonix-android-arm64 \$PREFIX/bin/reasonix" \
-    "reasonix -v" \
-    '```')"
-  escaped="$(printf '%s' "$notes" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
-  local resp upload_url
-  resp="$(api_get -X POST "https://api.github.com/repos/$REPO/releases" \
-    -H "Accept: application/vnd.github+json" \
-    -d "{\"tag_name\":\"$REL_TAG\",\"name\":\"Reasonix $TAG — Termux build\",\"body\":$escaped}")"
-  upload_url="$(printf '%s' "$resp" | python3 -c 'import json,sys; print(json.load(sys.stdin)["upload_url"].split("{")[0])')"
-  api_get -X POST "$upload_url?name=$(basename "$BIN")" \
-    -H "Accept: application/vnd.github+json" \
-    -H "Content-Type: application/octet-stream" \
-    --data-binary @"$BIN" >/dev/null
-  log "已发布: https://github.com/$REPO/releases/tag/$REL_TAG"
-}
-
-if command -v gh >/dev/null 2>&1; then
-  RELEASE_EXISTS="$(gh release list --limit 100 --repo "$REPO" --json tagName -q '.[].tagName' 2>/dev/null | grep -cx "$REL_TAG" || true)"
-  if [ "$RELEASE_EXISTS" -ge 1 ]; then
-    log "release $REL_TAG 已存在,跳过(覆盖需先 gh release delete $REL_TAG --repo $REPO --yes)"
-  else
-    NOTES_FILE="$TMPDIR/reasonix-release-notes.md"
-    printf '%s\n' \
-      "Automatic Termux build of upstream [$TAG](https://github.com/esengine/DeepSeek-Reasonix/releases/tag/$TAG) with the Termux adaptation patch." \
-      "" \
-      "- **reasonix-android-arm64**: prebuilt binary built on Termux (GOOS=android GOARCH=arm64, version $TAG)" \
-      "- **reasonix-termux.patch**: the adaptation patch (16 files)" \
-      "- **update-reasonix.sh**: rebuild/update script" \
-      "" \
-      "Install:" \
-      '```' \
-      "cp reasonix-android-arm64 \$PREFIX/bin/reasonix" \
-      "reasonix -v" \
-      '```' > "$NOTES_FILE"
-    gh release create "$REL_TAG" "$BIN" "$PATCH_FILE" "$SCRIPT_DIR/update-reasonix.sh" \
-      --repo "$REPO" \
-      --title "Reasonix $TAG — Termux build" \
-      --notes-file "$NOTES_FILE"
-    log "已发布: https://github.com/$REPO/releases/tag/$REL_TAG"
-  fi
-elif [ -n "${GITHUB_TOKEN:-}" ]; then
-  if release_exists; then
-    log "release $REL_TAG 已存在,跳过(覆盖需手动删除该 release)"
-  else
-    create_release_via_api
-  fi
+# 5. 上传二进制到仓库(发布由 GitHub Action 校验版本/hash 后完成)
+log "上传二进制到仓库 artifacts/"
+ART_DIR="$SCRIPT_DIR/artifacts"
+mkdir -p "$ART_DIR"
+cp "$BIN" "$ART_DIR/reasonix-android-arm64"
+cd "$SCRIPT_DIR"
+git add artifacts/reasonix-android-arm64
+if git commit -m "upload reasonix-android-arm64 $TAG" >/dev/null 2>&1; then
+  git push origin master
+  log "已上传 $TAG 二进制,等待 Action 校验并发布: https://github.com/$REPO/actions"
 else
-  echo "[release] 错误: 需要 gh(已认证)或设置 GITHUB_TOKEN 环境变量(Personal Access Token, scope 含 repo)" >&2
-  exit 1
+  log "二进制内容无变化,无需重新上传(最近提交: $(git log -1 --format=%s))"
 fi

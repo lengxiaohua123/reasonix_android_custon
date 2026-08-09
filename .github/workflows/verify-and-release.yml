@@ -1,0 +1,92 @@
+name: Verify uploaded binary and release
+
+# 本地 Termux 编译并把二进制推送到 artifacts/reasonix-android-arm64 后,
+# 校验其版本与上游最新 tag 一致且 hash 与已发布 release 不同,才创建/更新 release。
+
+on:
+  push:
+    branches: [master]
+    paths: ['artifacts/reasonix-android-arm64']
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  verify-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Resolve upstream tag, binary version, and hash
+        id: info
+        run: |
+          UPSTREAM="$(git ls-remote --tags --refs https://github.com/esengine/DeepSeek-Reasonix.git \
+            | awk -F/ '{print $NF}' | grep -v -- '-rc' | sort -V | tail -1)"
+          VERSION="$(go version -m artifacts/reasonix-android-arm64 | awk '/main.version/{print $2}')"
+          HASH="$(sha256sum artifacts/reasonix-android-arm64 | awk '{print $1}')"
+          echo "upstream=$UPSTREAM"
+          echo "version=$VERSION"
+          echo "hash=$HASH"
+          echo "upstream=$UPSTREAM" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+
+      - name: Skip unless binary is the latest upstream version
+        id: check
+        run: |
+          VER="${{ steps.info.outputs.version }}"
+          TAG="${{ steps.info.outputs.upstream }}"
+          if [ "$VER" != "$TAG" ]; then
+            echo "binary version $VER != upstream $TAG; skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Release will use tag termux-$TAG (binary version matches)"
+
+      - name: Create or update release
+        if: steps.check.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REPO="${{ github.repository }}"
+          TAG="${{ steps.check.outputs.tag }}"
+          REL_TAG="termux-$TAG"
+          HASH="${{ steps.info.outputs.hash }}"
+          if gh release view "$REL_TAG" --repo "$REPO" >/dev/null 2>&1; then
+            gh release download "$REL_TAG" -p reasonix-android-arm64 --repo "$REPO" -D /tmp/relasset --clobber >/dev/null 2>&1
+            OLD_HASH="$(sha256sum /tmp/relasset/reasonix-android-arm64 2>/dev/null | awk '{print $1}' || true)"
+            if [ "$OLD_HASH" = "$HASH" ]; then
+              echo "release $REL_TAG already carries this exact binary (sha256 $HASH); nothing to do"
+              exit 0
+            fi
+            gh release upload "$REL_TAG" artifacts/reasonix-android-arm64 --repo "$REPO" --clobber
+            echo "updated $REL_TAG asset (sha256 $HASH)"
+          else
+            printf '%s\n' \
+              "Termux build of upstream [$TAG](https://github.com/esengine/DeepSeek-Reasonix/releases/tag/$TAG) with the adaptation patch." \
+              "" \
+              "- **reasonix-android-arm64**: built locally on Termux (version $TAG, sha256 $HASH)" \
+              "- **reasonix-termux.patch**: adaptation patch" \
+              "- **update-reasonix.sh**: rebuild/update script" \
+              "" \
+              "Install:" \
+              '```' \
+              "cp reasonix-android-arm64 \$PREFIX/bin/reasonix" \
+              "reasonix -v" \
+              '```' > notes.md
+            gh release create "$REL_TAG" \
+              artifacts/reasonix-android-arm64 \
+              reasonix-termux.patch \
+              update-reasonix.sh \
+              --repo "$REPO" \
+              --title "Reasonix $TAG — Termux build" \
+              --notes-file notes.md
+            echo "created $REL_TAG (sha256 $HASH)"
+          fi
