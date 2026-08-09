@@ -23,7 +23,7 @@ log() { printf '[update] %s\n' "$*"; }
 
 # 1. 确定目标 tag:指定优先,否则取最新正式版(过滤 -rc 预发布)
 if [ -z "${REASONIX_TAG:-}" ]; then
-  TAG="$(git ls-remote --tags --refs "$REPO_URL" | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\\.' | grep -v -- '-rc' | sort -V | tail -1)"
+  TAG="$(git ls-remote --tags --refs "$REPO_URL" | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.' | grep -v -- '-rc' | sort -V | tail -1)"
   [ -n "$TAG" ] || { echo "无法解析上游最新 tag" >&2; exit 1; }
   log "最新正式版 tag: $TAG"
 else
@@ -81,3 +81,4 @@ if [ "$FAILS" -gt 0 ] || [ "$TEST_EXIT" -ne 0 ]; then
   exit 2
 fi
 echo "[update] 结果: 全部通过($PASS 个包),日志: $LOG_FILE"
+set +e

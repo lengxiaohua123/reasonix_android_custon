@@ -26,7 +26,7 @@ log() { printf '[release] %s\n' "$*"; }
 TAG="${RELEASE_TAG:-}"
 if [ -z "$TAG" ]; then
   TAG="$(git ls-remote --tags --refs https://github.com/esengine/DeepSeek-Reasonix.git \
-    | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\\.' | grep -v -- '-rc' | sort -V | tail -1)"
+    | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.' | grep -v -- '-rc' | sort -V | tail -1)"
 fi
 REL_TAG="termux-$TAG"
 log "上游 tag: $TAG → release: $REL_TAG"
