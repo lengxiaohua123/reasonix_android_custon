@@ -1,9 +1,11 @@
 package fileutil
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
 
@@ -57,7 +59,38 @@ func AtomicCreateFile(path string, data []byte, perm os.FileMode) error {
 	}
 	defer os.Remove(tmpPath)
 	if err := os.Link(tmpPath, path); err != nil {
-		return fmt.Errorf("publish new file %s: %w", path, err)
+		if !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
+			return fmt.Errorf("publish new file %s: %w", path, err)
+		}
+		// Android (Termux) denies hard links; an exclusive create keeps the
+		// "only when absent" guarantee without the link's shared inode.
+		if err := createExclusive(path, data, perm); err != nil {
+			return fmt.Errorf("publish new file %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
+// createExclusive writes path only when it does not exist, matching the
+// publish step of AtomicCreateFile on hosts where os.Link is denied.
+func createExclusive(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(path)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(path)
+		return err
 	}
 	return nil
 }
