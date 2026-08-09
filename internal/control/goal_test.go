@@ -1,0 +1,1407 @@
+package control
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync/atomic"
+	"testing"
+
+	"reasonix/internal/agent"
+	"reasonix/internal/event"
+	"reasonix/internal/evidence"
+	"reasonix/internal/goaleval"
+	"reasonix/internal/provider"
+	"reasonix/internal/store"
+	"reasonix/internal/tool"
+
+	_ "reasonix/internal/tool/builtin"
+)
+
+// goalRegistry returns a registry carrying the update_goal builtin so scripted
+// goal turns can report dispositions through the structured tool.
+func goalRegistry() *tool.Registry {
+	reg := tool.NewRegistry()
+	if t, ok := tool.LookupBuiltin("update_goal"); ok {
+		reg.Add(t)
+	}
+	return reg
+}
+
+// goalWireStatus maps FSM status values to the update_goal wire enum.
+func goalWireStatus(status string) string {
+	switch status {
+	case GoalStatusComplete:
+		return "complete"
+	case GoalStatusBlocked:
+		return "blocked"
+	default:
+		return "continue"
+	}
+}
+
+// goalToolTurn models one goal turn's provider sequence: the model calls
+// update_goal with the given disposition, then answers with text. Call IDs are
+// unique per call so recycled scripted turns never collide in the transcript.
+func goalToolTurn(status, reason, nextAction string) [][]provider.Chunk {
+	args, err := json.Marshal(map[string]string{"status": goalWireStatus(status), "reason": reason, "next_action": nextAction})
+	if err != nil {
+		panic(err)
+	}
+	id := fmt.Sprintf("ug-%d", goalToolCallSeq.Add(1))
+	return [][]provider.Chunk{
+		{toolCallChunk(id, "update_goal", string(args)), {Type: provider.ChunkDone}},
+		textTurn("worked on the goal"),
+	}
+}
+
+var goalToolCallSeq atomic.Uint64
+
+// fakeGoalEvaluator is a scripted bounded Goal evaluator for tests.
+type fakeGoalEvaluator struct {
+	outcome goaleval.Outcome
+	reason  string
+	err     error
+	calls   int
+}
+
+func (f *fakeGoalEvaluator) Evaluate(_ context.Context, _ goaleval.GoalEvidence) (goaleval.Verdict, error) {
+	f.calls++
+	if f.err != nil {
+		return goaleval.Verdict{}, f.err
+	}
+	return goaleval.Verdict{Outcome: f.outcome, Reason: f.reason}, nil
+}
+
+func TestGoalCommandAutoContinuesUntilComplete(t *testing.T) {
+	prov := &scriptedTurns{turns: flattenTurns(
+		goalToolTurn(GoalStatusRunning, "work in progress", "next step"),
+		goalToolTurn(GoalStatusComplete, "", ""),
+	)}
+	ag := agent.New(prov, goalRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 8)
+	c := New(Options{
+		Runner:   ag,
+		Executor: ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+
+	c.Submit("/goal ship the redesign")
+	waitForTurnDone(t, events)
+
+	if prov.call != 4 {
+		t.Fatalf("provider calls = %d, want 4 (continue report + continuation complete report)", prov.call)
+	}
+	if got := c.Goal(); got != "" {
+		t.Fatalf("completed goal should be cleared, got %q", got)
+	}
+	if got := c.GoalStatus(); got != GoalStatusComplete {
+		t.Fatalf("GoalStatus() = %q, want complete", got)
+	}
+	first := firstUserMessage(ag.Session().Messages)
+	if !strings.Contains(first, "<active-goal>\nship the redesign") {
+		t.Fatalf("first goal turn should include active goal block, got %q", first)
+	}
+	if strings.HasPrefix(first, PlanModeMarker) {
+		t.Fatalf("goal mode should not enter plan mode, got %q", first)
+	}
+}
+
+// flattenTurns concatenates per-goal-turn provider sequences into one flat
+// scripted provider stream.
+func flattenTurns(groups ...[][]provider.Chunk) [][]provider.Chunk {
+	var out [][]provider.Chunk
+	for _, g := range groups {
+		out = append(out, g...)
+	}
+	return out
+}
+
+// toolCallChunk builds a provider turn carrying one tool call.
+func toolCallChunk(id, name, args string) provider.Chunk {
+	return provider.Chunk{Type: provider.ChunkToolCall, ToolCall: &provider.ToolCall{ID: id, Name: name, Arguments: args}}
+}
+
+func TestActiveGoalBlockCarriesTaskContractAndPausePolicy(t *testing.T) {
+	block := activeGoalBlock("fix the parser", GoalResearchOff)
+	for _, want := range []string{
+		"Treat the user's goal as a task contract",
+		"Context, Request, Output format, Constraints",
+		"Pause policy",
+		"irreversible or externally visible operation",
+		"the requested scope has changed",
+		"information only the user can provide",
+		"output format and constraints are satisfied",
+	} {
+		if !strings.Contains(block, want) {
+			t.Fatalf("active goal block missing %q:\n%s", want, block)
+		}
+	}
+	if strings.Contains(block, "AutoResearch protocol") {
+		t.Fatalf("simple goal should not include AutoResearch protocol:\n%s", block)
+	}
+}
+
+func TestPlainInputWithStrongResearchSignalStaysNormal(t *testing.T) {
+	prov := &scriptedTurns{turns: [][]provider.Chunk{
+		textTurn("Here is the normal response."),
+	}}
+	ag := agent.New(prov, tool.NewRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 8)
+	c := New(Options{
+		Runner:   ag,
+		Executor: ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+
+	c.Submit("持续排查这个线上卡顿直到根因明确，并验证修复")
+	waitForTurnDone(t, events)
+
+	if prov.call != 1 {
+		t.Fatalf("provider calls = %d, want 1", prov.call)
+	}
+	first := firstUserMessage(ag.Session().Messages)
+	if !strings.HasSuffix(first, "持续排查这个线上卡顿直到根因明确，并验证修复") {
+		t.Fatalf("ordinary turn should preserve the original prompt suffix: %q", first)
+	}
+	if strings.Contains(first, "<active-goal>") || strings.Contains(first, "AutoResearch protocol") {
+		t.Fatalf("ordinary prompt should not enter Goal or AutoResearch:\n%s", first)
+	}
+	if got := c.GoalStatus(); got != GoalStatusStopped {
+		t.Fatalf("GoalStatus() = %q, want stopped", got)
+	}
+}
+
+func TestPlainInputWithStrongResearchSignalPreservesRefsWithoutStartingGoal(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "notes.txt"), []byte("important referenced evidence"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prov := &scriptedTurns{turns: [][]provider.Chunk{
+		textTurn("Referenced normal response."),
+	}}
+	ag := agent.New(prov, tool.NewRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 8)
+	c := New(Options{
+		WorkspaceRoot: root,
+		Runner:        ag,
+		Executor:      ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+
+	c.Submit("持续排查直到根因明确，并验证 @notes.txt")
+	waitForTurnDone(t, events)
+
+	first := firstUserMessage(ag.Session().Messages)
+	for _, want := range []string{
+		"important referenced evidence",
+	} {
+		if !strings.Contains(first, want) {
+			t.Fatalf("ordinary turn with refs missing %q:\n%s", want, first)
+		}
+	}
+	if strings.Contains(first, "<active-goal>") || strings.Contains(first, "AutoResearch protocol") {
+		t.Fatalf("ordinary prompt with refs should not enter Goal or AutoResearch:\n%s", first)
+	}
+	if got := c.GoalStatus(); got != GoalStatusStopped {
+		t.Fatalf("GoalStatus() = %q, want stopped", got)
+	}
+	if _, err := os.Stat(filepath.Join(root, ".reasonix", "autoresearch")); !os.IsNotExist(err) {
+		t.Fatalf("ordinary prompt created AutoResearch state: err=%v", err)
+	}
+}
+
+func TestPlainAutoResearchTaskPathDoesNotResumeGoal(t *testing.T) {
+	root := t.TempDir()
+	prov := &scriptedTurns{turns: [][]provider.Chunk{
+		textTurn("Handled as an ordinary turn."),
+	}}
+	ag := agent.New(prov, tool.NewRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 8)
+	c := New(Options{
+		WorkspaceRoot: root,
+		Runner:        ag,
+		Executor:      ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+	defer c.Close()
+	c.SetGoalWithResearchMode("seed resumable task", GoalResearchOn)
+	taskID := c.goals.currentAutoResearchTaskID()
+	if taskID == "" {
+		t.Fatal("expected seeded AutoResearch task")
+	}
+	c.ClearGoal()
+
+	input := "继续 .reasonix/autoresearch/" + taskID + "/ 这个任务"
+	c.Submit(input)
+	waitForTurnDone(t, events)
+
+	if prov.call != 1 {
+		t.Fatalf("provider calls = %d, want 1", prov.call)
+	}
+	first := firstUserMessage(ag.Session().Messages)
+	if !strings.HasSuffix(first, input) {
+		t.Fatalf("ordinary task path should preserve the original prompt suffix: %q", first)
+	}
+	if strings.Contains(first, "<active-goal>") || strings.Contains(first, "AutoResearch protocol") {
+		t.Fatalf("ordinary task path should not enter Goal or AutoResearch:\n%s", first)
+	}
+	if got := c.Goal(); got != "" {
+		t.Fatalf("ordinary task path should not resume Goal, got %q", got)
+	}
+	if got := c.GoalStatus(); got != GoalStatusStopped {
+		t.Fatalf("GoalStatus() = %q, want stopped", got)
+	}
+}
+
+func TestResearchGoalCreatesHostManagedAutoResearchTask(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	sessionPath := filepath.Join(root, "sessions", "s.jsonl")
+	ag := agent.New(&scriptedTurns{}, tool.NewRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	c := New(Options{WorkspaceRoot: root, SessionPath: sessionPath, Runner: ag, Executor: ag})
+
+	c.SetGoalWithResearchMode("fix the typo and add a test", GoalResearchOn)
+
+	data, err := os.ReadFile(goalStatePath(sessionPath))
+	if err != nil {
+		t.Fatalf("read goal state: %v", err)
+	}
+	var state goalState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("unmarshal goal state: %v", err)
+	}
+	if state.AutoResearchTaskID == "" {
+		t.Fatalf("AutoResearchTaskID was empty in persisted goal state: %+v", state)
+	}
+	for _, rel := range []string{
+		"state/task_spec.json",
+		"state/progress.json",
+		"state/findings.jsonl",
+		"logs/heartbeat.jsonl",
+	} {
+		path := filepath.Join(root, ".reasonix", "autoresearch", state.AutoResearchTaskID, rel)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected autoresearch file %s: %v", rel, err)
+		}
+	}
+	var spec struct {
+		SuccessCriteria []struct {
+			ID       string `json:"id"`
+			Required bool   `json:"required"`
+		} `json:"success_criteria"`
+	}
+	readJSONFileForTest(t, filepath.Join(root, ".reasonix", "autoresearch", state.AutoResearchTaskID, "state", "task_spec.json"), &spec)
+	if len(spec.SuccessCriteria) != 2 || spec.SuccessCriteria[0].ID != "objective_evidence" || spec.SuccessCriteria[1].ID != "verification" {
+		t.Fatalf("default success criteria = %+v, want objective_evidence and verification", spec.SuccessCriteria)
+	}
+	for _, criterion := range spec.SuccessCriteria {
+		if !criterion.Required {
+			t.Fatalf("default criterion %+v was not required", criterion)
+		}
+	}
+
+	composed := c.Compose("continue")
+	if !strings.Contains(composed, "<autoresearch-runtime>") || !strings.Contains(composed, "task_id: "+state.AutoResearchTaskID) || !strings.Contains(composed, "objective_evidence") {
+		t.Fatalf("Compose missing runtime summary for task %q:\n%s", state.AutoResearchTaskID, composed)
+	}
+}
+
+func TestResearchGoalCreatedEmitsLifecycleNotice(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	events := make(chan event.Event, 4)
+	c := New(Options{
+		WorkspaceRoot: root,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+
+	c.SetGoalWithResearchMode("investigate lifecycle notice", GoalResearchOn)
+
+	select {
+	case e := <-events:
+		if !strings.Contains(e.Text, "autoresearch task created") {
+			t.Fatalf("notice = %q, want autoresearch task created", e.Text)
+		}
+	default:
+		t.Fatal("expected autoresearch lifecycle notice")
+	}
+}
+
+func TestResearchGoalRepeatedSetReusesAutoResearchTask(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	events := make(chan event.Event, 8)
+	c := New(Options{
+		WorkspaceRoot: root,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+
+	goal := "请持续研究当前项目的 AutoResearch 状态栏展示链路，验证任务创建、状态刷新、右侧 Context 面板展示、状态栏 chip 展示是否一致。不要只看表面现象，需要找到根因、记录 evidence，并在完成前确认所有验证步骤通过。不要修改文件"
+	c.SetGoalWithResearchMode(goal, GoalResearchOn)
+	_, _, _, firstTaskID := c.goals.snapshot()
+	if firstTaskID == "" {
+		t.Fatal("first AutoResearch task id was empty")
+	}
+
+	c.SetGoalWithResearchMode(goal, GoalResearchOn)
+	c.SetGoal(goal)
+	_, _, _, repeatedTaskID := c.goals.snapshot()
+	if repeatedTaskID != firstTaskID {
+		t.Fatalf("repeated SetGoal created a new task: got %q, want %q", repeatedTaskID, firstTaskID)
+	}
+
+	entries, err := os.ReadDir(filepath.Join(root, ".reasonix", "autoresearch"))
+	if err != nil {
+		t.Fatalf("read autoresearch dir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("autoresearch task count = %d, want 1", len(entries))
+	}
+
+	createdNotices := 0
+	for {
+		select {
+		case e := <-events:
+			if strings.Contains(e.Text, "autoresearch task created") {
+				createdNotices++
+			}
+		default:
+			if createdNotices != 1 {
+				t.Fatalf("created notices = %d, want 1", createdNotices)
+			}
+			return
+		}
+	}
+}
+
+func TestResearchGoalMissingExplicitTaskBlocksInsteadOfCreatingNewTask(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	sessionPath := filepath.Join(root, "sessions", "s.jsonl")
+	var notices []string
+	c := New(Options{
+		WorkspaceRoot: root,
+		SessionPath:   sessionPath,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.Notice {
+				notices = append(notices, e.Text)
+			}
+		}),
+	})
+
+	c.SetGoalWithResearchMode("resume .reasonix/autoresearch/missing-task/", GoalResearchOn)
+
+	if got := c.GoalStatus(); got != GoalStatusBlocked {
+		t.Fatalf("GoalStatus() = %q, want blocked for missing explicit AutoResearch task", got)
+	}
+	if got := c.goals.currentAutoResearchTaskID(); got != "" {
+		t.Fatalf("current AutoResearch task id = %q, want none for missing explicit task", got)
+	}
+	entries, err := os.ReadDir(filepath.Join(root, ".reasonix", "autoresearch"))
+	if err != nil && !os.IsNotExist(err) {
+		t.Fatalf("ReadDir autoresearch root: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("created tasks for missing explicit resume: %+v", entries)
+	}
+	if !containsNotice(notices, "autoresearch resume failed") || !containsNotice(notices, "missing-task") {
+		t.Fatalf("notices = %+v, want explicit resume failure", notices)
+	}
+}
+
+func TestResearchGoalTurnAppendsAutoResearchHeartbeats(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	sessionPath := filepath.Join(root, "sessions", "s.jsonl")
+	prov := &scriptedTurns{turns: flattenTurns(
+		goalToolTurn(GoalStatusComplete, "", ""),
+		goalToolTurn(GoalStatusBlocked, "needs a repro trace", ""),
+	)}
+	ag := agent.New(prov, goalRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 4)
+	c := New(Options{
+		WorkspaceRoot: root,
+		SessionPath:   sessionPath,
+		Runner:        ag,
+		Executor:      ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+
+	c.Submit("/goal --research fix the typo and add a test")
+	waitForTurnDone(t, events)
+
+	data, err := os.ReadFile(goalStatePath(sessionPath))
+	if err != nil {
+		t.Fatalf("read goal state: %v", err)
+	}
+	var state goalState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("unmarshal goal state: %v", err)
+	}
+	heartbeats, err := c.autoResearch.store.Heartbeats(state.AutoResearchTaskID, 10)
+	if err != nil {
+		t.Fatalf("Heartbeats: %v", err)
+	}
+	if len(heartbeats) < 2 {
+		t.Fatalf("heartbeats = %+v, want at least starting and done", heartbeats)
+	}
+	if heartbeats[0].Status != "starting_turn" || heartbeats[len(heartbeats)-1].Status != "turn_done" {
+		t.Fatalf("heartbeats = %+v, want starting_turn then turn_done", heartbeats)
+	}
+}
+
+func TestResearchGoalTurnUpdatesAutoResearchStaleProgress(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	sessionPath := filepath.Join(root, "sessions", "s.jsonl")
+	prov := &scriptedTurns{turns: flattenTurns(
+		goalToolTurn(GoalStatusRunning, "still investigating", ""),
+		goalToolTurn(GoalStatusBlocked, "needs a repro trace", ""),
+	)}
+	ag := agent.New(prov, goalRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 8)
+	c := New(Options{
+		WorkspaceRoot: root,
+		SessionPath:   sessionPath,
+		Runner:        ag,
+		Executor:      ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+
+	c.Submit("/goal --research investigate stale progress")
+	waitForTurnDone(t, events)
+
+	data, err := os.ReadFile(goalStatePath(sessionPath))
+	if err != nil {
+		t.Fatalf("read goal state: %v", err)
+	}
+	var state goalState
+	if err := json.Unmarshal(data, &state); err != nil {
+		t.Fatalf("unmarshal goal state: %v", err)
+	}
+	summary, err := c.autoResearch.store.Summary(state.AutoResearchTaskID)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if summary.Iteration < 2 || summary.StaleCount != summary.Iteration || !summary.PivotRequired || summary.PivotCount != 1 {
+		t.Fatalf("summary = %+v, want stale progress for every no-evidence turn and pivot required", summary)
+	}
+}
+
+func TestResearchGoalCompletionIsInterceptedWhenReadinessFails(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	sessionPath := filepath.Join(root, "sessions", "s.jsonl")
+	prov := &scriptedTurns{turns: flattenTurns(
+		goalToolTurn(GoalStatusComplete, "", ""),
+		goalToolTurn(GoalStatusBlocked, "missing evidence", ""),
+	)}
+	ag := agent.New(prov, goalRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 8)
+	var notices []string
+	c := New(Options{
+		WorkspaceRoot: root,
+		SessionPath:   sessionPath,
+		Runner:        ag,
+		Executor:      ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.Notice {
+				notices = append(notices, e.Text)
+			}
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+
+	c.SetGoalWithResearchMode("identify the root cause", GoalResearchOn)
+
+	if err := newTurnOrchestrator(c).runGoalLoopWithRawDisplay(context.Background(), "start", "start", "start"); err != nil {
+		t.Fatalf("runGoalLoopWithRawDisplay: %v", err)
+	}
+
+	if got := c.GoalStatus(); got != GoalStatusBlocked {
+		t.Fatalf("GoalStatus() = %q, want blocked after the readiness intercept and a blocked report", got)
+	}
+	if prov.call != 4 {
+		t.Fatalf("provider calls = %d, want complete-intercepted + blocked turns (2 provider calls each)", prov.call)
+	}
+	if !sessionContainsUserText(ag.Session().Messages, "AutoResearch readiness check failed", "objective_evidence", "verification") {
+		t.Fatalf("transcript missing readiness intercept; last user:\n%s", lastUserMessage(ag.Session().Messages))
+	}
+	if !containsNotice(notices, "Goal is not ready to complete yet; continuing the remaining work.") {
+		t.Fatalf("notices = %+v, want readiness continuation notice", notices)
+	}
+}
+
+func TestControllerRecordsAutoResearchEvidence(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	c := New(Options{WorkspaceRoot: root})
+	c.SetGoalWithResearchMode("verify the fix", GoalResearchOn)
+	taskID := c.goals.currentAutoResearchTaskID()
+	if taskID == "" {
+		t.Fatal("expected autoresearch task id")
+	}
+
+	err := c.RecordAutoResearchEvidence("objective_evidence", AutoResearchEvidenceInput{
+		ID:       "f-objective",
+		Kind:     "file",
+		Summary:  "implementation inspected",
+		Source:   "file",
+		Paths:    []string{"internal/control/controller.go"},
+		Accepted: true,
+	})
+	if err != nil {
+		t.Fatalf("RecordAutoResearchEvidence objective_evidence: %v", err)
+	}
+	err = c.RecordAutoResearchEvidence("verification", AutoResearchEvidenceInput{
+		ID:       "f-verification",
+		Kind:     "test",
+		Summary:  "go test passed",
+		Source:   "command",
+		Command:  "go test ./internal/control",
+		Accepted: true,
+	})
+	if err != nil {
+		t.Fatalf("RecordAutoResearchEvidence verification: %v", err)
+	}
+
+	report, err := c.autoResearch.store.Readiness(taskID)
+	if err != nil {
+		t.Fatalf("Readiness: %v", err)
+	}
+	if !report.Ready {
+		t.Fatalf("readiness = %+v, want ready", report)
+	}
+}
+
+func TestAutoResearchEvidenceDoesNotChangeDefaultToolSurface(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	reg := tool.NewRegistry()
+	New(Options{WorkspaceRoot: root, Registry: reg})
+	if _, ok := reg.Get("autoresearch_record_evidence"); ok {
+		t.Fatalf("autoresearch_record_evidence should not be registered in the default provider-visible tool surface; tools=%v", reg.Names())
+	}
+	for _, schema := range reg.Schemas() {
+		if schema.Name == "autoresearch_record_evidence" {
+			t.Fatalf("autoresearch_record_evidence should not appear in provider schemas: %+v", reg.Schemas())
+		}
+	}
+}
+
+func TestResearchGoalCompletionMarksAutoResearchTaskComplete(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	sessionPath := filepath.Join(root, "sessions", "s.jsonl")
+	prov := &scriptedTurns{turns: flattenTurns(
+		[][]provider.Chunk{
+			{toolCallChunk("ug1", "update_goal", `{"status":"complete","reason":""}`), {Type: provider.ChunkDone}},
+			textTurn(`Done.
+
+<autoresearch-evidence>
+{"criterion_id":"objective_evidence","id":"f-objective","kind":"file","summary":"The implementation state was inspected directly.","source":"file","paths":["internal/control/controller.go"],"accepted":true}
+</autoresearch-evidence>
+<autoresearch-evidence>
+{"criterion_id":"verification","id":"f-verification","kind":"test","summary":"The focused AutoResearch tests passed.","source":"command","command":"go test ./internal/control","accepted":true}
+</autoresearch-evidence>`),
+		},
+	)}
+	ag := agent.New(prov, goalRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	var notices []string
+	c := New(Options{
+		WorkspaceRoot: root,
+		SessionPath:   sessionPath,
+		Runner:        ag,
+		Executor:      ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.Notice {
+				notices = append(notices, e.Text)
+			}
+		}),
+	})
+	c.SetGoalWithResearchMode("verify completion lifecycle", GoalResearchOn)
+	taskID := c.goals.currentAutoResearchTaskID()
+	if taskID == "" {
+		t.Fatal("expected autoresearch task id")
+	}
+
+	if err := newTurnOrchestrator(c).runGoalLoopWithRawDisplay(context.Background(), "start", "start", "start"); err != nil {
+		t.Fatalf("runGoalLoopWithRawDisplay: %v", err)
+	}
+
+	summary, err := c.autoResearch.store.Summary(taskID)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if summary.Status != "complete" {
+		t.Fatalf("AutoResearch status = %q, want complete", summary.Status)
+	}
+	if summary.StaleCount != 0 {
+		t.Fatalf("AutoResearch stale_count = %d, want 0 after accepted evidence", summary.StaleCount)
+	}
+	findings, err := c.autoResearch.store.Findings(taskID, 0)
+	if err != nil {
+		t.Fatalf("Findings: %v", err)
+	}
+	if len(findings) != 2 {
+		t.Fatalf("findings = %+v, want two assistant evidence records", findings)
+	}
+	if !containsNotice(notices, "autoresearch task completed") {
+		t.Fatalf("notices = %+v, want autoresearch task completed", notices)
+	}
+}
+
+func TestResearchGoalBlockedMarksAutoResearchTaskBlocked(t *testing.T) {
+	root := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	sessionPath := filepath.Join(root, "sessions", "s.jsonl")
+	prov := &scriptedTurns{turns: flattenTurns(
+		goalToolTurn(GoalStatusBlocked, "needs credentials", ""),
+	)}
+	ag := agent.New(prov, goalRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	var notices []string
+	c := New(Options{
+		WorkspaceRoot: root,
+		SessionPath:   sessionPath,
+		Runner:        ag,
+		Executor:      ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.Notice {
+				notices = append(notices, e.Text)
+			}
+		}),
+	})
+	c.SetGoalWithResearchMode("verify blocked lifecycle", GoalResearchOn)
+	taskID := c.goals.currentAutoResearchTaskID()
+	if taskID == "" {
+		t.Fatal("expected autoresearch task id")
+	}
+
+	if err := newTurnOrchestrator(c).runGoalLoopWithRawDisplay(context.Background(), "start", "start", "start"); err != nil {
+		t.Fatalf("runGoalLoopWithRawDisplay: %v", err)
+	}
+
+	summary, err := c.autoResearch.store.Summary(taskID)
+	if err != nil {
+		t.Fatalf("Summary: %v", err)
+	}
+	if summary.Status != "blocked" || !strings.Contains(summary.Blocker, "needs credentials") {
+		t.Fatalf("AutoResearch summary = %+v, want blocked with reason", summary)
+	}
+	if !containsNotice(notices, "AutoResearch task marked blocked.") {
+		t.Fatalf("notices = %+v, want autoresearch blocked notice", notices)
+	}
+}
+
+func TestPlainInputWithWeakResearchSignalStaysNormal(t *testing.T) {
+	prov := &scriptedTurns{turns: [][]provider.Chunk{
+		textTurn("Here is a normal answer."),
+	}}
+	ag := agent.New(prov, tool.NewRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 4)
+	c := New(Options{
+		Runner:   ag,
+		Executor: ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone {
+				events <- e
+			}
+		}),
+	})
+
+	c.Submit("长期来看这个模块怎么优化？")
+	waitForTurnDone(t, events)
+
+	first := firstUserMessage(ag.Session().Messages)
+	if strings.Contains(first, "<active-goal>") || strings.Contains(first, "AutoResearch protocol") {
+		t.Fatalf("ordinary prompt should stay outside Goal and AutoResearch:\n%s", first)
+	}
+	if got := c.GoalStatus(); got != GoalStatusStopped {
+		t.Fatalf("GoalStatus() = %q, want stopped", got)
+	}
+}
+
+func TestCancelStopsIdleGoalWithIncompleteTodos(t *testing.T) {
+	ag := agent.New(nil, nil, agent.NewSession(""), agent.Options{}, event.Discard)
+	ag.SeedTodoState([]evidence.TodoItem{{Content: "finish the migration", Status: "in_progress"}})
+	c := New(Options{Executor: ag, Sink: event.Discard})
+	c.SetGoalWithResearchMode("finish the migration", GoalResearchOn)
+
+	c.Cancel()
+
+	if got := c.GoalStatus(); got != GoalStatusStopped {
+		t.Fatalf("GoalStatus() = %q, want stopped", got)
+	}
+	if got := c.Goal(); got != "finish the migration" {
+		t.Fatalf("Goal() = %q, want stopped goal text to remain for display/persistence", got)
+	}
+	if todos := c.Todos(); len(todos) != 1 || todos[0].Status != "in_progress" {
+		t.Fatalf("Todos() after stopping idle goal = %+v, want incomplete todo retained", todos)
+	}
+}
+
+func TestGoalRepeatedBlockedStopsAfterThreeTurns(t *testing.T) {
+	prov := &scriptedTurns{turns: flattenTurns(
+		goalToolTurn(GoalStatusBlocked, "Needs credentials.", ""),
+	)}
+	ag := agent.New(prov, goalRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 8)
+	c := New(Options{
+		Runner:   ag,
+		Executor: ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+
+	c.Submit("/goal deploy the service")
+	waitForTurnDone(t, events)
+
+	if prov.call != 2 {
+		t.Fatalf("provider calls = %d, want 1 goal turn (report + final answer)", prov.call)
+	}
+	if got := c.GoalStatus(); got != GoalStatusBlocked {
+		t.Fatalf("GoalStatus() = %q, want blocked", got)
+	}
+	if rt := c.GoalRuntime(); rt.StopCause != "" {
+		t.Fatalf("StopCause = %q, want empty for a genuine task block", rt.StopCause)
+	}
+}
+
+// TestGoalBlockedReportTransitionsImmediately pins the FSM decision: a single
+// blocked report ends the goal at once — no three-turn confirmation ritual and
+// no intercept.
+func TestGoalBlockedReportTransitionsImmediately(t *testing.T) {
+	g := &goalMachine{goal: "wait for user review", status: GoalStatusRunning}
+	g.turnsLimit = 10
+	g.noProgressLimit = defaultNoProgressLimit
+
+	res := g.advance(goalAdvanceInput{
+		report: &goalTurnReport{status: GoalStatusBlocked, reason: "waiting for user review"},
+	})
+
+	if res.cont {
+		t.Fatal("blocked report must stop the goal loop immediately")
+	}
+	if res.intercept != "" {
+		t.Fatalf("blocked report triggered an intercept %q", res.intercept)
+	}
+	if g.status != GoalStatusBlocked {
+		t.Fatalf("machine status = %q, want blocked", g.status)
+	}
+}
+
+func TestGoalRestartClearsBlockedAndCompletesOnRetry(t *testing.T) {
+	prov := &scriptedTurns{turns: flattenTurns(
+		goalToolTurn(GoalStatusBlocked, "needs credentials", ""),
+		goalToolTurn(GoalStatusComplete, "", ""),
+	)}
+	ag := agent.New(prov, goalRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	events := make(chan event.Event, 12)
+	c := New(Options{
+		Runner:   ag,
+		Executor: ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone || e.Kind == event.Notice {
+				events <- e
+			}
+		}),
+	})
+
+	c.Submit("/goal deploy the service")
+	waitForTurnDone(t, events)
+	if got := c.GoalStatus(); got != GoalStatusBlocked {
+		t.Fatalf("first run GoalStatus() = %q, want blocked", got)
+	}
+
+	c.Submit("/goal deploy the service")
+	waitForTurnDone(t, events)
+	if prov.call != 4 {
+		t.Fatalf("provider calls = %d, want 2 goal turns (blocked + resumed complete)", prov.call)
+	}
+	if got := c.GoalStatus(); got != GoalStatusComplete {
+		t.Fatalf("resumed GoalStatus() = %q, want complete; a fresh run starts a clean audit", got)
+	}
+}
+
+// TestIncompleteGoalTodos verifies that formatIncompleteTodos detects
+// unfinished tasks and returns a formatted reminder, and returns empty
+// when all todos are complete.
+func TestIncompleteGoalTodos(t *testing.T) {
+	prov := &scriptedTurns{turns: [][]provider.Chunk{textTurn("done")}}
+	ag := agent.New(prov, tool.NewRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	c := New(Options{Runner: ag, Executor: ag, Sink: event.Discard})
+	reminder := func() string { return formatIncompleteTodos(c.goalTodos(), ag.ReadinessResult().Reason) }
+
+	// Seed with incomplete todos.
+	ag.SeedTodoState([]evidence.TodoItem{
+		{Content: "Fix the parser", Status: "in_progress"},
+		{Content: "Add tests", Status: "pending"},
+	})
+	msg := reminder()
+	if msg == "" {
+		t.Fatal("formatIncompleteTodos() returned empty string, expected reminder")
+	}
+	if !strings.Contains(msg, "Fix the parser") {
+		t.Fatalf("reminder should mention 'Fix the parser', got: %q", msg)
+	}
+	if !strings.Contains(msg, "Add tests") {
+		t.Fatalf("reminder should mention 'Add tests', got: %q", msg)
+	}
+	if !strings.Contains(msg, "todo_write") {
+		t.Fatalf("reminder should suggest updating todos via todo_write, got: %q", msg)
+	}
+
+	// Mark all complete.
+	ag.ReplaceTodoState([]evidence.TodoItem{
+		{Content: "Fix the parser", Status: "completed"},
+		{Content: "Add tests", Status: "completed"},
+	})
+	if got := reminder(); got != "" {
+		t.Fatalf("formatIncompleteTodos() with all-complete = %q, want empty", got)
+	}
+
+	// Empty todo list.
+	ag.ReplaceTodoState(nil)
+	if got := reminder(); got != "" {
+		t.Fatalf("formatIncompleteTodos() with empty list = %q, want empty", got)
+	}
+}
+
+// TestGoalInterceptsCompleteWithIncompleteTodos verifies that a complete report
+// with unfinished canonical todos is always rejected: the FSM continues with
+// the missing requirements, and completion is accepted only once the todos are
+// actually done (there is no override path anymore).
+func TestGoalInterceptsCompleteWithIncompleteTodos(t *testing.T) {
+	todoWrite, ok := tool.LookupBuiltin("todo_write")
+	if !ok {
+		t.Fatal("todo_write builtin not registered")
+	}
+	completeStep, ok := tool.LookupBuiltin("complete_step")
+	if !ok {
+		t.Fatal("complete_step builtin not registered")
+	}
+	reg := goalRegistry()
+	reg.Add(todoWrite)
+	reg.Add(completeStep)
+	completeTurn := [][]provider.Chunk{
+		{toolCallChunk("ug1", "update_goal", `{"status":"complete","reason":""}`), {Type: provider.ChunkDone}},
+		textTurn("All done."),
+	}
+	fixedTurn := [][]provider.Chunk{
+		{toolCallChunk("cs1", "complete_step", `{"step":"Fix the parser","result":"fixed","evidence":[{"kind":"manual","summary":"verified by inspection"}]}`), {Type: provider.ChunkDone}},
+		{toolCallChunk("t1", "todo_write", `{"todos":[{"content":"Fix the parser","status":"completed"}]}`), {Type: provider.ChunkDone}},
+		{toolCallChunk("ug2", "update_goal", `{"status":"complete","reason":""}`), {Type: provider.ChunkDone}},
+		textTurn("All done now."),
+	}
+	prov := &scriptedTurns{turns: flattenTurns(completeTurn, fixedTurn)}
+	ag := agent.New(prov, reg, agent.NewSession(""), agent.Options{}, event.Discard)
+	// Seed incomplete todos before starting.
+	ag.SeedTodoState([]evidence.TodoItem{
+		{Content: "Fix the parser", Status: "in_progress"},
+	})
+
+	notices := make(chan string, 64)
+	done := make(chan event.Event, 1)
+	c := New(Options{
+		Runner:   ag,
+		Executor: ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			switch e.Kind {
+			case event.Notice:
+				notices <- e.Text
+			case event.TurnDone:
+				done <- e
+			}
+		}),
+	})
+
+	c.Submit("/goal fix everything")
+	<-done // wait for the entire goal loop to finish
+	close(notices)
+
+	// Collect all notices.
+	var allNotices []string
+	for n := range notices {
+		allNotices = append(allNotices, n)
+	}
+
+	found := false
+	for _, n := range allNotices {
+		if strings.Contains(n, "Goal is not ready to complete yet") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected a not-ready continuation notice, got %v", allNotices)
+	}
+	if prov.call != 6 {
+		t.Fatalf("provider calls = %d, want intercepted turn + fixed turn (2 and 4 calls)", prov.call)
+	}
+	if c.GoalStatus() != GoalStatusComplete {
+		t.Fatalf("GoalStatus() = %q, want complete after the todos were actually finished", c.GoalStatus())
+	}
+}
+
+func TestGoalAdvanceResultCannotCrossGoalLifecycle(t *testing.T) {
+	newResult := func(t *testing.T, g *goalMachine) goalAdvanceResult {
+		t.Helper()
+		g.set("old goal", GoalResearchAuto, "", nil)
+		res := g.advance(goalAdvanceInput{
+			report: &goalTurnReport{status: GoalStatusComplete, reason: ""},
+			todos: []evidence.TodoItem{{
+				Content: "unfinished work from old goal",
+				Status:  "in_progress",
+			}},
+		})
+		if res.intercept == "" {
+			t.Fatal("test setup: expected an incomplete-todo intercept")
+		}
+		return res
+	}
+
+	t.Run("current result is accepted", func(t *testing.T) {
+		var g goalMachine
+		res := newResult(t, &g)
+		if got, ok := g.acceptContinuation(res); !ok || got != res.intercept {
+			t.Fatalf("acceptContinuation() = (%q, %v), want current intercept", got, ok)
+		}
+	})
+
+	t.Run("replacement goal invalidates result", func(t *testing.T) {
+		var g goalMachine
+		res := newResult(t, &g)
+		g.set("replacement goal", GoalResearchAuto, "", nil)
+		if got, ok := g.acceptContinuation(res); ok {
+			t.Fatalf("replacement goal accepted stale intercept %q", got)
+		}
+	})
+
+	t.Run("stop and resume invalidates result", func(t *testing.T) {
+		var g goalMachine
+		res := newResult(t, &g)
+		g.stop(GoalStatusStopped, nil)
+		if _, _, _, resumed, _ := g.resume(nil); !resumed {
+			t.Fatal("test setup: goal did not resume")
+		}
+		if got, ok := g.acceptContinuation(res); ok {
+			t.Fatalf("resumed goal accepted stale intercept %q", got)
+		}
+	})
+
+	t.Run("newer advance invalidates result", func(t *testing.T) {
+		var g goalMachine
+		res := newResult(t, &g)
+		g.advance(goalAdvanceInput{report: &goalTurnReport{status: GoalStatusRunning, reason: "keep going"}})
+		if got, ok := g.acceptContinuation(res); ok {
+			t.Fatalf("newer FSM step accepted stale intercept %q", got)
+		}
+	})
+}
+
+// TestGoalCompletionRequiresAllTodosDone verifies that a goal with seeded
+// incomplete canonical todos cannot complete until the model marks them done;
+// the completing turn force-completes any stragglers via a synthetic todo_write
+// so the frontend panel reflects the final state.
+func TestGoalCompletionRequiresAllTodosDone(t *testing.T) {
+	todoWrite, ok := tool.LookupBuiltin("todo_write")
+	if !ok {
+		t.Fatal("todo_write builtin not registered")
+	}
+	completeStep, ok := tool.LookupBuiltin("complete_step")
+	if !ok {
+		t.Fatal("complete_step builtin not registered")
+	}
+	reg := goalRegistry()
+	reg.Add(todoWrite)
+	reg.Add(completeStep)
+	prov := &scriptedTurns{turns: flattenTurns(
+		[][]provider.Chunk{
+			{toolCallChunk("cs1", "complete_step", `{"step":"Step 1","result":"done","evidence":[{"kind":"manual","summary":"verified"}]}`), {Type: provider.ChunkDone}},
+			{toolCallChunk("cs2", "complete_step", `{"step":"Step 2","result":"done","evidence":[{"kind":"manual","summary":"verified"}]}`), {Type: provider.ChunkDone}},
+			{toolCallChunk("t1", "todo_write", `{"todos":[{"content":"Step 1","status":"completed"},{"content":"Step 2","status":"completed"}]}`), {Type: provider.ChunkDone}},
+			{toolCallChunk("ug1", "update_goal", `{"status":"complete","reason":""}`), {Type: provider.ChunkDone}},
+			textTurn("All done."),
+		},
+	)}
+	ag := agent.New(prov, reg, agent.NewSession(""), agent.Options{}, event.Discard)
+	ag.SeedTodoState([]evidence.TodoItem{
+		{Content: "Step 1", Status: "in_progress"},
+		{Content: "Step 2", Status: "pending"},
+	})
+
+	var tools []event.Event
+	done := make(chan event.Event, 1)
+	c := New(Options{
+		Runner:   ag,
+		Executor: ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			switch e.Kind {
+			case event.ToolDispatch, event.ToolResult:
+				tools = append(tools, e)
+			case event.TurnDone:
+				done <- e
+			}
+		}),
+	})
+
+	c.Submit("/goal do everything")
+	<-done // wait for the goal loop to finish
+
+	if c.GoalStatus() != GoalStatusComplete {
+		t.Fatalf("GoalStatus() = %q, want complete", c.GoalStatus())
+	}
+
+	// All todos in the executor must be completed.
+	for _, td := range c.executor.CanonicalTodoState() {
+		if td.Status != "completed" {
+			t.Fatalf("canonical todo %q = %s, want completed", td.Content, td.Status)
+		}
+	}
+}
+
+// TestCompleteRemainingGoalTodosEdgeCases verifies that the helper is a no-op
+// when there are no incomplete todos or no todos at all.
+func TestCompleteRemainingGoalTodosEdgeCases(t *testing.T) {
+	t.Run("empty todo list does nothing", func(t *testing.T) {
+		ag := agent.New(nil, nil, agent.NewSession(""), agent.Options{}, event.Discard)
+		c := New(Options{Executor: ag, Sink: event.Discard})
+		c.completeRemainingGoalTodos()
+		if len(ag.CanonicalTodoState()) != 0 {
+			t.Fatal("expected no changes to empty todo list")
+		}
+	})
+
+	t.Run("all completed does nothing", func(t *testing.T) {
+		ag := agent.New(nil, nil, agent.NewSession(""), agent.Options{}, event.Discard)
+		ag.SeedTodoState([]evidence.TodoItem{
+			{Content: "A", Status: "completed"},
+			{Content: "B", Status: "completed"},
+		})
+		var events []event.Event
+		c := New(Options{
+			Executor: ag,
+			Sink: event.FuncSink(func(e event.Event) {
+				events = append(events, e)
+			}),
+		})
+		c.completeRemainingGoalTodos()
+		if len(events) > 0 {
+			t.Fatalf("expected no events when all todos already completed, got %d", len(events))
+		}
+	})
+
+	t.Run("force-completes mixed todos", func(t *testing.T) {
+		ag := agent.New(nil, nil, agent.NewSession(""), agent.Options{}, event.Discard)
+		ag.SeedTodoState([]evidence.TodoItem{
+			{Content: "A", Status: "completed"},
+			{Content: "B", Status: "in_progress"},
+			{Content: "C", Status: "pending"},
+		})
+		var captured []event.Event
+		c := New(Options{
+			Executor: ag,
+			Sink: event.FuncSink(func(e event.Event) {
+				if e.Kind == event.ToolDispatch || e.Kind == event.ToolResult {
+					captured = append(captured, e)
+				}
+			}),
+		})
+		c.completeRemainingGoalTodos()
+		// All must be completed.
+		for _, td := range ag.CanonicalTodoState() {
+			if td.Status != "completed" {
+				t.Fatalf("todo %q = %s, want completed", td.Content, td.Status)
+			}
+		}
+		// Must include a ToolDispatch+ToolResult for the synthetic todo_write.
+		if len(captured) != 2 {
+			t.Fatalf("expected 2 synthetic events (dispatch+result), got %d", len(captured))
+		}
+		if captured[0].Kind != event.ToolDispatch || captured[0].Tool.Name != "todo_write" {
+			t.Fatalf("first event should be ToolDispatch for todo_write, got %+v", captured[0].Kind)
+		}
+		if captured[1].Kind != event.ToolResult || captured[1].Tool.Name != "todo_write" {
+			t.Fatalf("second event should be ToolResult for todo_write, got %+v", captured[1].Kind)
+		}
+	})
+
+	t.Run("empty-string status treated as incomplete", func(t *testing.T) {
+		ag := agent.New(nil, nil, agent.NewSession(""), agent.Options{}, event.Discard)
+		ag.SeedTodoState([]evidence.TodoItem{
+			{Content: "A", Status: ""},
+			{Content: "B", Status: "completed"},
+		})
+		c := New(Options{Executor: ag, Sink: event.Discard})
+		c.completeRemainingGoalTodos()
+		for _, td := range ag.CanonicalTodoState() {
+			if td.Status != "completed" {
+				t.Fatalf("empty-string todo %q should be force-completed, got %q", td.Content, td.Status)
+			}
+		}
+	})
+}
+
+// TestRepeatedCompleteWithIncompleteTodosPausesOnBudget verifies that a goal
+// whose model keeps reporting complete while todos stay unfinished is
+// intercepted every turn (no override path) and finally pauses on the turn
+// budget instead of completing.
+func TestRepeatedCompleteWithIncompleteTodosPausesOnBudget(t *testing.T) {
+	// The write-class budget is 20 turns; give the scripted provider a full
+	// pair per turn so the model keeps reporting complete each time.
+	turns := flattenTurns()
+	for range 21 {
+		turns = append(turns, goalToolTurn(GoalStatusComplete, "", "")...)
+	}
+	prov := &scriptedTurns{turns: turns}
+	ag := agent.New(prov, goalRegistry(), agent.NewSession(""), agent.Options{}, event.Discard)
+	ag.SeedTodoState([]evidence.TodoItem{
+		{Content: "Fix the parser", Status: "in_progress"},
+	})
+
+	done := make(chan event.Event, 1)
+	c := New(Options{
+		Runner:   ag,
+		Executor: ag,
+		Sink: event.FuncSink(func(e event.Event) {
+			if e.Kind == event.TurnDone {
+				done <- e
+			}
+		}),
+	})
+
+	c.Submit("/goal fix everything")
+	<-done // wait for the whole loop (intercept until the turn budget pauses)
+
+	if c.GoalStatus() == GoalStatusComplete {
+		t.Fatal("goal must not complete with incomplete todos")
+	}
+	if got := c.GoalStatus(); got != GoalStatusBlocked {
+		t.Fatalf("GoalStatus() = %q, want blocked (budget pause)", got)
+	}
+	rt := c.GoalRuntime()
+	if rt.StopCause == "" {
+		t.Fatal("expected a stop cause for the budget pause")
+	}
+	if rt.TurnsUsed != rt.TurnsLimit {
+		t.Fatalf("turn budget was not enforced: %d/%d", rt.TurnsUsed, rt.TurnsLimit)
+	}
+}
+
+func readJSONFileForTest(t *testing.T, path string, out any) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	if err := json.Unmarshal(data, out); err != nil {
+		t.Fatalf("Unmarshal(%s): %v", path, err)
+	}
+}
+
+func sessionContainsUserText(messages []provider.Message, needles ...string) bool {
+	for _, msg := range messages {
+		if msg.Role != provider.RoleUser {
+			continue
+		}
+		ok := true
+		for _, needle := range needles {
+			if !strings.Contains(msg.Content, needle) {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return true
+		}
+	}
+	return false
+}
+
+func containsNotice(notices []string, needle string) bool {
+	for _, notice := range notices {
+		if strings.Contains(notice, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+// TestSessionRotationClearsActiveGoal pins the /new & /clear goal semantics:
+// a fresh session starts with no active goal (so the old goal's text stops
+// injecting into its first turns), while the OLD session's persisted
+// goal-state sidecar keeps the running goal so resuming it restores the goal.
+func TestSessionRotationClearsActiveGoal(t *testing.T) {
+	dir := t.TempDir()
+	exec := agent.New(nil, nil, agent.NewSession("sys"), agent.Options{}, event.Discard)
+	oldPath := filepath.Join(dir, "session.jsonl")
+	c := New(Options{Executor: exec, SystemPrompt: "sys", SessionDir: dir, SessionPath: oldPath, Label: "test"})
+
+	c.SetGoal("ship the release checklist")
+	if got := c.Goal(); got != "ship the release checklist" {
+		t.Fatalf("Goal() = %q after SetGoal", got)
+	}
+	if composed := c.Compose("hello"); !strings.Contains(composed, "<active-goal>") {
+		t.Fatalf("running goal should inject into turns, composed = %q", composed)
+	}
+
+	if err := c.NewSession(); err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	if got := c.Goal(); got != "" {
+		t.Fatalf("Goal() after /new = %q, want empty", got)
+	}
+	if composed := c.Compose("hello"); strings.Contains(composed, "<active-goal>") {
+		t.Fatalf("old goal leaked into the fresh session's turn: %q", composed)
+	}
+	// The old session keeps its running goal on disk for /resume.
+	oldState, err := os.ReadFile(store.SessionGoalState(oldPath))
+	if err != nil {
+		t.Fatalf("read old goal state: %v", err)
+	}
+	if !strings.Contains(string(oldState), "ship the release checklist") || !strings.Contains(string(oldState), GoalStatusRunning) {
+		t.Fatalf("old session's goal state was disturbed by /new: %s", oldState)
+	}
+	// The new session's sidecar records the cleared (stopped) state, so
+	// profile restores read it as "no running goal".
+	newState, err := os.ReadFile(store.SessionGoalState(c.SessionPath()))
+	if err != nil {
+		t.Fatalf("read new goal state: %v", err)
+	}
+	if strings.Contains(string(newState), "ship the release checklist") {
+		t.Fatalf("new session's goal state carries the old goal: %s", newState)
+	}
+
+	// Same contract for /clear.
+	c.SetGoal("another goal")
+	if err := c.ClearSession(); err != nil {
+		t.Fatalf("ClearSession: %v", err)
+	}
+	if got := c.Goal(); got != "" {
+		t.Fatalf("Goal() after /clear = %q, want empty", got)
+	}
+	if composed := c.Compose("hello"); strings.Contains(composed, "<active-goal>") {
+		t.Fatalf("old goal leaked into the cleared session's turn: %q", composed)
+	}
+}
+
+func TestGoalSidecarRoundTripPreservesBlockedDeliveryCheckpoint(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	exec := agent.New(nil, nil, agent.NewSession("sys"), agent.Options{}, event.Discard)
+	c := New(Options{Executor: exec, SessionDir: dir, SessionPath: path, Label: "test"})
+	c.SetGoal("finish the delivery")
+	scopeID, _, ok := c.goals.deliveryScope()
+	if !ok || scopeID == "" {
+		t.Fatal("Goal did not allocate a delivery scope")
+	}
+	cp := evidence.DeliveryCheckpoint{
+		ScopeID:             scopeID,
+		CriteriaEstablished: true,
+		WorkObserved:        true,
+		MutationObserved:    true,
+		PendingMutation:     true,
+	}
+	statePath, data, persist := c.goals.setDeliveryCheckpoint(cp, nil)
+	c.persistGoalState(statePath, data, persist)
+	c.stopGoal(GoalStatusBlocked)
+
+	freshExec := agent.New(nil, nil, agent.NewSession("sys"), agent.Options{}, event.Discard)
+	fresh := New(Options{Executor: freshExec, SessionDir: dir, Label: "fresh"})
+	fresh.Resume(agent.NewSession("sys"), path)
+	if fresh.Goal() != "finish the delivery" || fresh.GoalStatus() != GoalStatusBlocked {
+		t.Fatalf("restored Goal = (%q, %q), want blocked Goal", fresh.Goal(), fresh.GoalStatus())
+	}
+	if got := freshExec.DeliveryCheckpoint(); got != cp {
+		t.Fatalf("restored checkpoint = %+v, want %+v", got, cp)
+	}
+	if !fresh.ResumeGoal() {
+		t.Fatal("ResumeGoal rejected a restored blocked Goal")
+	}
+	id, _, ok := fresh.goals.deliveryScope()
+	if !ok || id != scopeID {
+		t.Fatalf("resumed scope = %q, want %q", id, scopeID)
+	}
+}
+
+func TestLegacyRunningGoalSidecarAllocatesScope(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "legacy.jsonl")
+	data := []byte(`{"goal":"legacy goal","status":"running"}`)
+	if err := os.WriteFile(store.SessionGoalState(path), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	exec := agent.New(nil, nil, agent.NewSession("sys"), agent.Options{}, event.Discard)
+	c := New(Options{Executor: exec, SessionDir: dir, Label: "test"})
+	c.Resume(agent.NewSession("sys"), path)
+	id, task, ok := c.goals.deliveryScope()
+	if !ok || id == "" || task != "legacy goal" {
+		t.Fatalf("legacy delivery scope = (%q, %q, %v)", id, task, ok)
+	}
+	if got := exec.DeliveryCheckpoint(); got.ScopeID != id {
+		t.Fatalf("legacy checkpoint scope = %q, want %q", got.ScopeID, id)
+	}
+}
