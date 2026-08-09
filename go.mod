@@ -19,12 +19,12 @@ require (
 	github.com/godbus/dbus/v5 v5.2.2
 	github.com/joho/godotenv v1.5.1
 	github.com/kevinburke/ssh_config v1.6.0
-	github.com/larksuite/oapi-sdk-go/v3 v3.9.9
+	github.com/larksuite/oapi-sdk-go/v3 v3.9.10
 	github.com/mattn/go-runewidth v0.0.27
 	github.com/pkg/sftp v1.13.11
 	github.com/rivo/uniseg v0.4.7
 	github.com/sabhiram/go-gitignore v0.0.0-20210923224102-525f6e181f06
-	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	github.com/spf13/pflag v1.0.10
 	github.com/tree-sitter/go-tree-sitter v0.25.0
 	github.com/tree-sitter/tree-sitter-javascript v0.25.0
