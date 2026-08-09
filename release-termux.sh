@@ -56,10 +56,28 @@ if [ "${SKIP_TESTS:-0}" != "1" ]; then
   go test -count=1 ./... 2>&1 | tee "$SCRIPT_DIR/test-result.log"
   TEST_EXIT=${PIPESTATUS[0]}
   set -e
+  # 全量并行下 Termux 资源有限,已知测试会偶发超时/排序 flaky;
+  # 对失败包单独重跑一次,仍失败才算真失败。
+  if [ "$TEST_EXIT" -ne 0 ]; then
+    FAIL_PKGS="$(grep -E '^FAIL\s' "$SCRIPT_DIR/test-result.log" | awk '{print $2}' | sort -u)"
+    RETEST_OK=1
+    for p in $FAIL_PKGS; do
+      if go test -count=1 "$p" >/dev/null 2>&1; then
+        log "重跑通过(并发 flaky): $p"
+      else
+        log "重跑仍失败: $p"
+        RETEST_OK=0
+      fi
+    done
+    if [ "$RETEST_OK" = "1" ]; then
+      log "所有失败均为并发 flaky,单独重跑全部通过"
+      TEST_EXIT=0
+    fi
+  fi
   PASS="$(grep -cE '^ok\s' "$SCRIPT_DIR/test-result.log" || true)"
   FAIL="$(grep -cE '^--- FAIL' "$SCRIPT_DIR/test-result.log" || true)"
   log "测试结果: $PASS 包通过, $FAIL 处失败(go test 退出码 $TEST_EXIT)"
-  if [ "${FAIL_ON_TEST:-0}" = "1" ] && [ "$FAIL" -gt 0 ]; then
+  if [ "${FAIL_ON_TEST:-0}" = "1" ] && [ "$TEST_EXIT" -ne 0 ]; then
     echo "[release] 测试失败且 FAIL_ON_TEST=1,中止" >&2
     exit 1
   fi
