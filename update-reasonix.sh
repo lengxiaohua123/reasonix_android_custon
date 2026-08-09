@@ -37,6 +37,11 @@ if [ ! -d "$WORKDIR/.git" ]; then
   git clone --depth 1 --branch "$TAG" "$REPO_URL" "$WORKDIR"
 else
   log "更新已有工作目录 $WORKDIR"
+  # 本地 init 的仓库没有 origin 时补上,才能按 tag 更新。
+  if ! git -C "$WORKDIR" remote get-url origin >/dev/null 2>&1; then
+    git -C "$WORKDIR" remote add origin "$REPO_URL"
+  fi
+  log "警告: 将切换到 $TAG 的干净状态;本地未提交改动和当前分支历史会被丢弃(提交可经 git reflog 找回)"
   git -C "$WORKDIR" fetch --depth 1 origin tag "$TAG"
   git -C "$WORKDIR" checkout --force --detach "$TAG"
 fi
