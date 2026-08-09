@@ -1,0 +1,307 @@
+diff --git a/Makefile b/Makefile
+index 3baf85e..ae24e38 100644
+--- a/Makefile
++++ b/Makefile
+@@ -6,13 +6,18 @@ LDFLAGS := -s -w \
+ 	-X main.gitCommit=$(GIT_COMMIT) \
+ 	-X main.buildTimeUTC=$(BUILD_TIME_UTC)
+ GOEXE := $(shell go env GOEXE)
++ANDROID_ARCH ?= arm64
+ 
+-.PHONY: build vet fmt lint lint-cross lint-update test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
++.PHONY: build android vet fmt lint lint-cross lint-update test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
+ 
+ build:
+ 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/reasonix$(GOEXE) ./cmd/reasonix
+ 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/reasonix-plugin-example$(GOEXE) ./cmd/reasonix-plugin-example
+ 
++android:
++	@mkdir -p bin
++	CGO_ENABLED=0 GOOS=android GOARCH=$(ANDROID_ARCH) go build -ldflags "$(LDFLAGS)" -o bin/reasonix-android-$(ANDROID_ARCH) ./cmd/reasonix
++
+ vet:
+ 	go vet ./...
+ 
+diff --git a/internal/cli/mcp_manager_actions.go b/internal/cli/mcp_manager_actions.go
+index 22aa359..7932556 100644
+--- a/internal/cli/mcp_manager_actions.go
++++ b/internal/cli/mcp_manager_actions.go
+@@ -366,6 +366,11 @@ func mcpOpenCommand(target string) (*exec.Cmd, error) {
+ 		return exec.Command("open", target), nil
+ 	case "windows":
+ 		return exec.Command("rundll32", "url.dll,FileProtocolHandler", target), nil
++	case "android":
++		if p, err := exec.LookPath("termux-open"); err == nil {
++			return exec.Command(p, target), nil
++		}
++		return exec.Command("xdg-open", target), nil
+ 	default:
+ 		return exec.Command("xdg-open", target), nil
+ 	}
+diff --git a/internal/cli/remote_connect.go b/internal/cli/remote_connect.go
+index 027e162..3eee4ed 100644
+--- a/internal/cli/remote_connect.go
++++ b/internal/cli/remote_connect.go
+@@ -730,6 +730,13 @@ func openInBrowser(url string) error {
+ 		cmd, args = "open", []string{url}
+ 	case "windows":
+ 		cmd, args = "rundll32", []string{"url.dll,FileProtocolHandler", url}
++	case "android":
++		// termux-api's termux-open-url opens the browser; fall back when absent.
++		if p, err := exec.LookPath("termux-open-url"); err == nil {
++			cmd, args = p, []string{url}
++		} else {
++			cmd, args = "xdg-open", []string{url}
++		}
+ 	default:
+ 		cmd, args = "xdg-open", []string{url}
+ 	}
+diff --git a/internal/cli/theme_osc_other.go b/internal/cli/theme_osc_other.go
+index 713dc8e..e2c6069 100644
+--- a/internal/cli/theme_osc_other.go
++++ b/internal/cli/theme_osc_other.go
+@@ -1,4 +1,4 @@
+-//go:build !darwin && !dragonfly && !freebsd && !linux && !netbsd && !openbsd && !solaris
++//go:build !darwin && !android && !dragonfly && !freebsd && !linux && !netbsd && !openbsd && !solaris
+ 
+ package cli
+ 
+diff --git a/internal/cli/theme_osc_unix.go b/internal/cli/theme_osc_unix.go
+index e0c89e3..3c41ed4 100644
+--- a/internal/cli/theme_osc_unix.go
++++ b/internal/cli/theme_osc_unix.go
+@@ -1,4 +1,4 @@
+-//go:build darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
++//go:build darwin || android || dragonfly || freebsd || linux || netbsd || openbsd || solaris
+ 
+ package cli
+ 
+diff --git a/internal/config/mutate.go b/internal/config/mutate.go
+index 5e9dd01..3419a75 100644
+--- a/internal/config/mutate.go
++++ b/internal/config/mutate.go
+@@ -290,10 +290,18 @@ func configEditLockRegistryDir() (string, error) {
+ 	}
+ 	digest := sha256.Sum256([]byte(identity))
+ 	if runtime.GOOS != "windows" {
+-		// The OS-wide temporary root is invariant across process-specific TMPDIR
+-		// overrides. The per-user directory is verified and forced to mode 0700
+-		// before the advisory lock file is opened.
+-		return filepath.Join(string(filepath.Separator), "tmp", fmt.Sprintf("reasonix-config-locks-%x", digest[:8])), nil
++		root := filepath.Join(string(filepath.Separator), "tmp")
++		if !dirWritable(root) {
++			// Lock registry must converge across TMPDIR/HOME overrides, so the
++			// fallback root is the platform temp root, not the process TMPDIR:
++			// Termux's /tmp is not writable, so use its $PREFIX/tmp instead.
++			if prefix := os.Getenv("PREFIX"); prefix != "" {
++				root = filepath.Join(prefix, "tmp")
++			} else if tmp := os.TempDir(); tmp != "" {
++				root = tmp
++			}
++		}
++		return filepath.Join(root, fmt.Sprintf("reasonix-config-locks-%x", digest[:8])), nil
+ 	}
+ 	home := strings.TrimSpace(current.HomeDir)
+ 	if home == "" {
+@@ -302,6 +310,19 @@ func configEditLockRegistryDir() (string, error) {
+ 	return filepath.Join(filepath.Clean(home), ".reasonix", "locks", fmt.Sprintf("config-edits-%x", digest[:8])), nil
+ }
+ 
++// dirWritable reports whether dir accepts new files. Used to pick a lock
++// registry root that works on hosts without a writable /tmp (Termux).
++func dirWritable(dir string) bool {
++	f, err := os.CreateTemp(dir, ".reasonix-wtest-*")
++	if err != nil {
++		return false
++	}
++	name := f.Name()
++	f.Close()
++	os.Remove(name)
++	return true
++}
++
+ func configEditPathKey(path string) (string, error) {
+ 	path = strings.TrimSpace(path)
+ 	if path == "" {
+diff --git a/internal/fileutil/atomicwrite.go b/internal/fileutil/atomicwrite.go
+index 6f55bfc..d19a679 100644
+--- a/internal/fileutil/atomicwrite.go
++++ b/internal/fileutil/atomicwrite.go
+@@ -1,9 +1,11 @@
+ package fileutil
+ 
+ import (
++	"errors"
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"syscall"
+ 	"time"
+ )
+ 
+@@ -57,7 +59,38 @@ func AtomicCreateFile(path string, data []byte, perm os.FileMode) error {
+ 	}
+ 	defer os.Remove(tmpPath)
+ 	if err := os.Link(tmpPath, path); err != nil {
+-		return fmt.Errorf("publish new file %s: %w", path, err)
++		if !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
++			return fmt.Errorf("publish new file %s: %w", path, err)
++		}
++		// Android (Termux) denies hard links; an exclusive create keeps the
++		// "only when absent" guarantee without the link's shared inode.
++		if err := createExclusive(path, data, perm); err != nil {
++			return fmt.Errorf("publish new file %s: %w", path, err)
++		}
++	}
++	return nil
++}
++
++// createExclusive writes path only when it does not exist, matching the
++// publish step of AtomicCreateFile on hosts where os.Link is denied.
++func createExclusive(path string, data []byte, perm os.FileMode) error {
++	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
++	if err != nil {
++		return err
++	}
++	if _, err := f.Write(data); err != nil {
++		f.Close()
++		os.Remove(path)
++		return err
++	}
++	if err := f.Sync(); err != nil {
++		f.Close()
++		os.Remove(path)
++		return err
++	}
++	if err := f.Close(); err != nil {
++		os.Remove(path)
++		return err
+ 	}
+ 	return nil
+ }
+diff --git a/internal/mcplaunch/process_other.go b/internal/mcplaunch/process_other.go
+index fb59685..4973ace 100644
+--- a/internal/mcplaunch/process_other.go
++++ b/internal/mcplaunch/process_other.go
+@@ -1,4 +1,4 @@
+-//go:build !aix && !darwin && !dragonfly && !freebsd && !linux && !netbsd && !openbsd && !solaris && !windows
++//go:build !aix && !android && !darwin && !dragonfly && !freebsd && !linux && !netbsd && !openbsd && !solaris && !windows
+ 
+ package mcplaunch
+ 
+diff --git a/internal/mcplaunch/process_unix.go b/internal/mcplaunch/process_unix.go
+index 9185928..46df723 100644
+--- a/internal/mcplaunch/process_unix.go
++++ b/internal/mcplaunch/process_unix.go
+@@ -1,4 +1,4 @@
+-//go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
++//go:build aix || android || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
+ 
+ package mcplaunch
+ 
+diff --git a/internal/notify/sender_android.go b/internal/notify/sender_android.go
+new file mode 100644
+index 0000000..07c0d5d
+--- /dev/null
++++ b/internal/notify/sender_android.go
+@@ -0,0 +1,26 @@
++//go:build android
++
++package notify
++
++import (
++	"os/exec"
++
++	"reasonix/internal/secrets"
++)
++
++// PlatformSender delivers notifications through termux-api's
++// termux-notification command (termux-api package + Termux:API app).
++type PlatformSender struct{}
++
++// NewPlatformSender returns the best-effort sender for the current platform.
++func NewPlatformSender() PlatformSender { return PlatformSender{} }
++
++func (PlatformSender) Send(m Message) error {
++	cmd := exec.Command("termux-notification", "--title", m.Title, "--content", m.Body)
++	cmd.Env = secrets.ProcessEnv()
++	if err := cmd.Start(); err != nil {
++		return err
++	}
++	go func() { _ = cmd.Wait() }()
++	return nil
++}
+diff --git a/internal/notify/sender_linux.go b/internal/notify/sender_linux.go
+index bdbe695..fcb62d8 100644
+--- a/internal/notify/sender_linux.go
++++ b/internal/notify/sender_linux.go
+@@ -1,4 +1,4 @@
+-//go:build linux
++//go:build linux && !android
+ 
+ package notify
+ 
+diff --git a/internal/notify/sender_other.go b/internal/notify/sender_other.go
+index 11fa267..579ee2a 100644
+--- a/internal/notify/sender_other.go
++++ b/internal/notify/sender_other.go
+@@ -1,4 +1,4 @@
+-//go:build !darwin && !linux && !windows
++//go:build !android && !darwin && !linux && !windows
+ 
+ package notify
+ 
+diff --git a/internal/plugin/transport_stdio.go b/internal/plugin/transport_stdio.go
+index 48df31a..d13170c 100644
+--- a/internal/plugin/transport_stdio.go
++++ b/internal/plugin/transport_stdio.go
+@@ -449,9 +449,9 @@ func stdioShell() string {
+ 			return exe
+ 		}
+ 	}
+-	for _, shell := range []string{"/bin/zsh", "/bin/bash", "/bin/sh"} {
+-		if isExecutableFile(shell) {
+-			return shell
++	for _, name := range []string{"zsh", "bash", "sh"} {
++		if p, err := exec.LookPath(name); err == nil {
++			return p
+ 		}
+ 	}
+ 	return ""
+diff --git a/internal/repair/process_other.go b/internal/repair/process_other.go
+index e99c554..9e74e4d 100644
+--- a/internal/repair/process_other.go
++++ b/internal/repair/process_other.go
+@@ -1,4 +1,4 @@
+-//go:build !aix && !darwin && !dragonfly && !freebsd && !linux && !netbsd && !openbsd && !solaris && !windows
++//go:build !aix && !android && !darwin && !dragonfly && !freebsd && !linux && !netbsd && !openbsd && !solaris && !windows
+ 
+ package repair
+ 
+diff --git a/internal/repair/process_unix.go b/internal/repair/process_unix.go
+index 671d86f..38f8ee4 100644
+--- a/internal/repair/process_unix.go
++++ b/internal/repair/process_unix.go
+@@ -1,4 +1,4 @@
+-//go:build aix || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
++//go:build aix || android || darwin || dragonfly || freebsd || linux || netbsd || openbsd || solaris
+ 
+ package repair
+ 
+diff --git a/internal/tool/builtin/bash.go b/internal/tool/builtin/bash.go
+index d766be1..d6d0bed 100644
+--- a/internal/tool/builtin/bash.go
++++ b/internal/tool/builtin/bash.go
+@@ -726,9 +726,9 @@ func loginShell() string {
+ 			return p
+ 		}
+ 	}
+-	for _, shell := range []string{"/bin/zsh", "/bin/bash", "/bin/sh"} {
+-		if isExecutableFile(shell) {
+-			return shell
++	for _, name := range []string{"zsh", "bash", "sh"} {
++		if p, err := exec.LookPath(name); err == nil {
++			return p
+ 		}
+ 	}
+ 	return ""

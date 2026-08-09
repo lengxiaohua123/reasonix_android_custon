@@ -68,6 +68,10 @@ benchmarks/context-maintenance-e2e/run/
 # Local scratch
 temp/
 
+# Termux update workflow outputs (see update-reasonix.sh)
+reasonix-test-*.log
+test-result.log
+
 # Official theme art intermediate outputs / caches
 scripts/official-theme-art/out/
 scripts/official-theme-art/__pycache__/
