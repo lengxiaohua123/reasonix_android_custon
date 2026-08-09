@@ -53,8 +53,10 @@ git apply "$PATCH_FILE"
 log "补丁应用成功($(grep -c '^diff --git' "$PATCH_FILE") 个文件)"
 
 # 4. 编译 android 版 reasonix(复用 Makefile 的 android target)
-make android
-log "编译完成: $WORKDIR/bin/reasonix-android-arm64"
+# Version comes from the upstream tag explicitly; git describe is
+# unreliable when a commit carries multiple tags (e.g. desktop-v1.21.3).
+make android VERSION="$TAG"
+log "编译完成: $WORKDIR/bin/reasonix-android-arm64 (version $TAG)"
 
 # 5. 运行测试并写日志
 log "运行测试: go test $TEST_PKGS"
