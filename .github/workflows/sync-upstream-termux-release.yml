@@ -74,7 +74,9 @@ jobs:
           go test -count=1 ./... 2>&1 | tee test.log
           status=${PIPESTATUS[0]}
           set -e
-          # test "$status" -eq 0
+          # Fail the job when any package fails; otherwise a broken tree
+          # would still get synced and released.
+          test "$status" -eq 0
 
       - name: Sync sources back to this repo
         if: steps.check.outputs.skip == 'false'
@@ -82,7 +84,7 @@ jobs:
           cd "$GITHUB_WORKSPACE"
           # Replace everything except repo-specific files with upstream+patch.
           find . -mindepth 1 -maxdepth 1 \
-            ! -name .git ! -name .github ! -name .gitignore \
+            ! -name .git ! -name .github ! -name .gitignore ! -name upstream \
             ! -name reasonix-termux.patch ! -name update-reasonix.sh \
             -exec rm -rf {} +
           rsync -a --exclude='.git' --exclude='.github' --exclude='.gitignore' \
