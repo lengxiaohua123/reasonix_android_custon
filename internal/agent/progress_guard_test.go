@@ -72,6 +72,40 @@ func TestProgressGuardEscalatesOnZeroGainRounds(t *testing.T) {
 	}
 }
 
+type outcomeSampleSink struct {
+	samples []evidence.OutcomeSample
+}
+
+func (s *outcomeSampleSink) Emit(event.Event) {}
+func (s *outcomeSampleSink) RecordOutcomeProgress(sample evidence.OutcomeSample) {
+	s.samples = append(s.samples, sample)
+}
+
+func TestOutcomeShadowRecordsEveryRoundWithoutTouchingGuards(t *testing.T) {
+	reg := tool.NewRegistry()
+	reg.Add(fakeTool{name: "read_probe", readOnly: true})
+	sink := &outcomeSampleSink{}
+	a := New(nil, reg, NewSession(""), Options{}, sink)
+	a.resetTurnEvidence()
+
+	first := runRound(t, a, "a.go")
+	second := runRound(t, a, "a.go")
+	if len(sink.samples) != 2 {
+		t.Fatalf("got %d shadow samples, want one per round", len(sink.samples))
+	}
+	if s := sink.samples[0]; s.Round != 1 || s.Exploration != 1 || s.Objective != 0 {
+		t.Fatalf("round 1 sample = %+v, want exploration 1 objective 0", s)
+	}
+	if s := sink.samples[1]; s.Round != 2 || s.Exploration != 0 || s.LegacyGain != 0 {
+		t.Fatalf("round 2 repeat sample = %+v, want all-zero with legacy gain 0", s)
+	}
+	// The shadow observes; the guard alone decides. Round texts stay untouched
+	// below the nudge threshold exactly as before.
+	if strings.Contains(first[0], "[progress guard]") || strings.Contains(second[0], "[progress guard]") {
+		t.Fatalf("shadow must not change guard behavior: %q / %q", first[0], second[0])
+	}
+}
+
 func TestProgressGuardResetsOnNewEvidence(t *testing.T) {
 	reg := tool.NewRegistry()
 	reg.Add(fakeTool{name: "read_probe", readOnly: true})

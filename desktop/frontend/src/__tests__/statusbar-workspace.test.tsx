@@ -190,6 +190,23 @@ console.log("\nstatus bar workspace");
 }
 
 {
+  const exact = renderStatusBar({
+    items: ["turn_tps"],
+    lastTurnOutputTokens: 100,
+    lastTurnModelMs: 5_000,
+  });
+  ok(exact.includes("20 t/s"), "completed TPS uses provider-output time");
+
+  const estimated = renderStatusBar({
+    items: ["turn_tps"],
+    lastTurnOutputTokens: 100,
+    lastTurnModelMs: 5_000,
+    lastTurnOutputEstimated: true,
+  });
+  ok(estimated.includes("≈20 t/s"), "fallback TPS is visibly marked as estimated");
+}
+
+{
   const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>", {
     pretendToBeVisual: true,
     url: "http://localhost/",

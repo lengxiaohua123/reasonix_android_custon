@@ -30,6 +30,7 @@ type Event struct {
 	Err             string            `json:"err,omitempty" externalizable:"true"`
 	Outcome         string            `json:"outcome,omitempty"`
 	Readiness       *FinalReadiness   `json:"readiness,omitempty"`
+	CheckpointTurn  *int              `json:"checkpointTurn,omitempty"`
 	RetryAttempt    int               `json:"retryAttempt,omitempty"`
 	RetryMax        int               `json:"retryMax,omitempty"`
 	RetryScope      string            `json:"retryScope,omitempty"` // "headers" | "stream"; omit for older clients
@@ -142,6 +143,7 @@ func ToWire(e event.Event) Event {
 		w.Extension = ToWireExtensionSurface(e.Extension)
 	case event.TurnDone:
 		w.Outcome = e.Outcome
+		w.CheckpointTurn = e.CheckpointTurn
 		if e.Readiness != nil {
 			w.Readiness = &FinalReadiness{Attempts: e.Readiness.Attempts, Missing: append([]string(nil), e.Readiness.Missing...)}
 		}

@@ -1304,24 +1304,7 @@ func chatREPL(args []string, version string) int {
 	// goal/recovery state, lifecycle). Same construction inputs as
 	// buildController so the replacement matches this session's launch wiring;
 	// the CLI holds no SharedHost, so each rebuild owns its plugin host.
-	m.rebuildRuntime = func(ctx context.Context, spec controllerBuildSpec, old *control.Controller) (*boot.BuildResult, error) {
-		effectiveOverrides := overrides
-		if spec.EffortOverride != nil {
-			effectiveOverrides.Effort = spec.EffortOverride
-		}
-		res, err := boot.Rebuild(ctx, old, cliProfileBuildOptions(spec.ModelRef, *maxSteps, false, sink, spec.RuntimeProfile, effectiveOverrides))
-		if err != nil {
-			return nil, err
-		}
-		// The interactive approval gate and the --yolo posture are frontend
-		// wiring boot.Rebuild deliberately leaves to the caller (it carries
-		// the Ask/Auto/Yolo tool-approval mode, not the launch flag).
-		res.Controller.EnableInteractiveApproval()
-		if *yolo {
-			res.Controller.SetAutoApproveTools(true)
-		}
-		return res, nil
-	}
+	m.bindRuntimeRebuilder(*maxSteps, sink, *yolo, overrides, cliProfileBuildOptions)
 	m.runtimeProfile = profile
 	if effortOverride != nil {
 		m.effortLevel = *effortOverride

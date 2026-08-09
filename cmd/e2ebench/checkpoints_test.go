@@ -67,18 +67,24 @@ func TestSnapshotterCapturesWorkspaceChanges(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(work, "code.py"), []byte("v1"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	snap := startSnapshotter(work, dst, time.Now())
-
-	time.Sleep(2 * snapshotPollInterval)
+	polls := make(chan time.Time)
+	acks := make(chan struct{})
+	snap := startSnapshotterWithPoll(work, dst, time.Now(), polls, acks)
+	poll := func() {
+		t.Helper()
+		polls <- time.Time{}
+		<-acks
+	}
+	poll()
 	// The metrics sidecar updating must not trigger a snapshot on its own.
 	if err := os.WriteFile(filepath.Join(work, ".run-metrics.json"), []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(2 * snapshotPollInterval)
+	poll()
 	if err := os.WriteFile(filepath.Join(work, "code.py"), []byte("v2 changed"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(2 * snapshotPollInterval)
+	poll()
 	taken := snap.halt()
 
 	if len(taken) != 1 {

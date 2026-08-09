@@ -84,6 +84,15 @@ type trajScan struct {
 	seen                               map[string]bool // (name, args) pairs already dispatched
 	gapPlanner, gapCompact, gapHandoff bool
 	sawCallIDs                         bool
+
+	outcomePoints          []outcomePoint
+	verifySeen, verifyPass map[string]bool
+	verifyPoints           []verifyPoint
+
+	gapReason, gapCompl, gapPrompt int64
+
+	denyDelegations  map[string]bool
+	delegationToolMs map[string]int64
 }
 
 // modelAttempt is one sampling attempt's wall interval; planner marks attempts
@@ -97,6 +106,13 @@ type modelAttempt struct {
 // is the wasted/questionable bucket the report itemizes.
 var productiveOutcomes = map[string]bool{
 	"evidence_gain": true, "mutation": true, "verification": true, "finalization": true,
+	"delegation": true,
+}
+
+// delegationTools are calls whose cost story is the delegation itself, not the
+// local mutation/verification the batch would otherwise classify as.
+var delegationTools = map[string]bool{
+	"task": true, "parallel_tasks": true, "fleet": true, "research": true,
 }
 
 // bookkeepingTools are ledger tools whose rounds cost a full round-trip
@@ -123,11 +139,14 @@ func classifyRound(gap gapInfo, b *toolBatch) string {
 	if b == nil {
 		return "finalization"
 	}
-	verification, mutation := false, false
+	verification, mutation, delegation := false, false, false
 	allBookkeeping, allDup := true, true
 	for _, c := range b.infos {
 		if c.verification == "passed" || c.verification == "failed" {
 			verification = true
+		}
+		if delegationTools[c.name] {
+			delegation = true
 		}
 		if c.resolved && !c.readOnly && !c.errored && !bookkeepingTools[c.name] {
 			mutation = true
@@ -140,6 +159,8 @@ func classifyRound(gap gapInfo, b *toolBatch) string {
 		}
 	}
 	switch {
+	case delegation:
+		return "delegation"
 	case verification:
 		return "verification"
 	case mutation:

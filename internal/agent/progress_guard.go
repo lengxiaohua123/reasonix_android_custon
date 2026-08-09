@@ -49,16 +49,39 @@ func (g *progressGuard) observe(receipts []Receipt) int {
 type Receipt = evidence.Receipt
 
 // applyBatchGuards runs both post-batch guards: the storm breaker (failure
-// fixation) and the progress guard (zero-gain repetition).
+// fixation) and the progress guard (zero-gain repetition). The outcome shadow
+// observes the same receipts afterwards without influencing either guard.
 func (a *Agent) applyBatchGuards(calls []provider.ToolCall, outcomes []toolOutcome, results []string, receiptMark int) {
 	a.applyStormBreaker(calls, outcomes, results, receiptMark)
 	a.applyProgressGuard(results, outcomes, receiptMark)
+	a.observeOutcomeShadow(receiptMark, results, outcomes)
+	a.observeDelegationAdmission(calls)
 }
 
-// resetTurnEvidence clears the ledger and the progress-guard state together.
+// resetTurnEvidence clears the ledger and both progress scorers together.
 func (a *Agent) resetTurnEvidence() {
 	a.evidence.Reset()
 	a.progress.reset()
+	a.outcome = evidence.NewOutcomeTracker()
+	a.ebm = ebmState{}
+	a.governor = governorState{}
+}
+
+// observeOutcomeShadow scores the round's receipts through the shadow outcome
+// tracker, lets the EBM policy stamp (and under its arm, act on) the sample,
+// then records it. Unlike the guards it observes every round.
+func (a *Agent) observeOutcomeShadow(receiptMark int, results []string, outcomes []toolOutcome) {
+	if a.evidence == nil {
+		return
+	}
+	if a.outcome == nil {
+		a.outcome = evidence.NewOutcomeTracker()
+	}
+	sample := a.outcome.ScoreRound(a.evidence.ReceiptsSince(receiptMark))
+	a.applyEBM(&sample, results, outcomes)
+	a.applyGovernor(&sample)
+	a.armGovernorCapture(sample)
+	event.RecordOutcomeProgress(a.sink, sample)
 }
 
 // applyProgressGuard escalates when consecutive rounds stop producing new

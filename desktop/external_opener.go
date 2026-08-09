@@ -1,12 +1,17 @@
 package main
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 
 	"reasonix/internal/config"
 )
@@ -228,4 +233,165 @@ func (a *App) OpenWorkspaceInExternalOpenerForTab(tabID, id string) error {
 		return fmt.Errorf("external opener %q is not available", strings.TrimSpace(id))
 	}
 	return launchPlatformExternalOpener(spec, path)
+}
+
+// OpenLocalPathInExternalOpener opens an absolute local path with one of the
+// detected, platform-owned applications. It shares OpenLocalPath's safety
+// checks so a markdown link cannot turn an AI-generated executable path into
+// an executable launch.
+func (a *App) OpenLocalPathInExternalOpener(path, id string) error {
+	path, err := normalizeLocalOpenPath(path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !openTargetPathAllowed(path, info) {
+		return fmt.Errorf("refusing to open executable target %q", path)
+	}
+
+	specs := cachedPlatformExternalOpenerSpecs()
+	var spec externalOpenerSpec
+	var ok bool
+	if strings.TrimSpace(id) == "" {
+		spec, ok = resolveExternalOpener(specs, a.preferredExternalOpenerID())
+	} else {
+		spec, ok = externalOpenerByID(specs, id)
+	}
+	if !ok {
+		return fmt.Errorf("external opener %q is not available", strings.TrimSpace(id))
+	}
+	return launchPlatformExternalOpener(spec, path)
+}
+
+// SaveLocalPathAs copies a local file to a user-selected destination without
+// changing the source. Directories are intentionally excluded: Finder's
+// reveal action is the appropriate operation for them.
+func (a *App) SaveLocalPathAs(path string) (string, error) {
+	path, err := normalizeLocalOpenPath(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("cannot save a directory as a file")
+	}
+	if a.ctx == nil {
+		return "", nil
+	}
+	target, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:                "Save file as",
+		DefaultDirectory:     filepath.Dir(path),
+		DefaultFilename:      filepath.Base(path),
+		CanCreateDirectories: true,
+	})
+	if err != nil || target == "" {
+		return "", err
+	}
+	if filepath.Clean(target) == filepath.Clean(path) {
+		return "", fmt.Errorf("destination is the same as the source")
+	}
+	if err := copyLocalPathAs(path, target); err != nil {
+		return "", err
+	}
+	return target, nil
+}
+
+func copyLocalPathAs(path, target string) (err error) {
+	src, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	sourceInfo, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	if sourceInfo.IsDir() {
+		return fmt.Errorf("cannot save a directory as a file")
+	}
+	sameFile, err := localSaveDestinationIsSource(sourceInfo, target)
+	if err != nil {
+		return err
+	}
+	if sameFile {
+		return fmt.Errorf("destination is the same as the source")
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(target), "."+filepath.Base(target)+".reasonix-copy-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() {
+		if tmpName != "" {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	if _, err = io.Copy(tmp, src); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Chmod(sourceInfo.Mode().Perm()); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err = tmp.Close(); err != nil {
+		return err
+	}
+	if err = replaceLocalSaveDestination(tmpName, target); err != nil {
+		return err
+	}
+	tmpName = ""
+	return nil
+}
+
+// localSaveDestinationIsSource compares filesystem identity, not just path
+// spelling. os.Stat follows aliases, so this catches case-insensitive paths,
+// symlinks, and hard links before the destination is replaced.
+func localSaveDestinationIsSource(sourceInfo os.FileInfo, target string) (bool, error) {
+	targetInfo, err := os.Stat(target)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return os.SameFile(sourceInfo, targetInfo), nil
+}
+
+// externalOpenerWorkingDirectory returns a valid directory for process launch.
+// Editors still receive the original file path as an argument; only the
+// process CWD changes when the requested path is a regular file.
+func externalOpenerWorkingDirectory(path string) string {
+	info, err := os.Stat(path)
+	if err == nil && !info.IsDir() {
+		return filepath.Dir(path)
+	}
+	return path
+}
+
+func externalOpenerLaunchPath(spec externalOpenerSpec, path string) string {
+	if spec.View.Kind == externalOpenerTerminal || isTerminalLaunchMode(spec.LaunchMode) {
+		return externalOpenerWorkingDirectory(path)
+	}
+	return path
+}
+
+func isTerminalLaunchMode(mode string) bool {
+	switch mode {
+	case "ghostty", "gnome-terminal", "konsole", "kitty", "alacritty", "cwd", "windows-terminal", "console":
+		return true
+	default:
+		return false
+	}
 }

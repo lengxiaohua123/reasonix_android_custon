@@ -104,6 +104,33 @@ type trajectorySummary struct {
 	ShadowIntent   string `json:"shadow_intent,omitempty"`
 	ShadowVerdict  string `json:"shadow_verdict,omitempty"`
 	ShadowComplete bool   `json:"shadow_complete,omitempty"`
+
+	// Completion report (last of the turn): the host-authored receipt's
+	// verdict and the gaps it refused to hide, priced against the grader.
+	CompletionVerdict  string   `json:"completion_verdict,omitempty"`
+	CompletionGaps     int      `json:"completion_gaps,omitempty"`
+	CompletionGapKinds []string `json:"completion_gap_kinds,omitempty"`
+	ClaimsVerified     int      `json:"claims_verified,omitempty"`
+	ClaimsUnbacked     int      `json:"claims_unbacked,omitempty"`
+
+	// Outcome shadow: the runtime outcome scorer's per-round series condensed,
+	// or a verification-receipt backfill for recordings that predate it.
+	Outcome *outcomeSummary `json:"outcome,omitempty"`
+
+	// Cognition: executor reasoning/completion joined per model round, plus a
+	// census of slow rounds — gaps that bought unusually large thinking.
+	ReasoningTokensTotal     int64         `json:"reasoning_tokens_total,omitempty"`
+	CompletionTokensTotal    int64         `json:"completion_tokens_total,omitempty"`
+	SlowRounds               int           `json:"slow_rounds,omitempty"`
+	SlowRoundGapMs           int64         `json:"slow_round_gap_ms,omitempty"`
+	SlowRoundReasoningTokens int64         `json:"slow_round_reasoning_tokens,omitempty"`
+	Rounds                   []roundDigest `json:"rounds,omitempty"`
+
+	// Delegation admission shadow: verdicts recorded by the runtime, and the
+	// subagent time spent by tools the shadow would have denied.
+	DelegationCalls    int   `json:"delegation_calls,omitempty"`
+	DelegationDenies   int   `json:"delegation_denies,omitempty"`
+	DeniedDelegationMs int64 `json:"denied_delegation_ms,omitempty"`
 }
 
 // toolWall is the best available tool wall-clock: interval union when the
@@ -124,6 +151,34 @@ type trajectoryRecord struct {
 		Verdict  string `json:"verdict"`
 		Complete bool   `json:"complete"`
 	} `json:"contract_shadow"`
+	CompletionReport *struct {
+		Verdict        string   `json:"verdict"`
+		Gaps           int      `json:"gaps"`
+		GapKinds       []string `json:"gap_kinds"`
+		ClaimsVerified int      `json:"claims_verified"`
+		ClaimsUnbacked int      `json:"claims_unbacked"`
+	} `json:"completion_report"`
+	OutcomeProgress *struct {
+		Exploration      int  `json:"exploration"`
+		Verification     int  `json:"verification"`
+		Objective        int  `json:"objective"`
+		Regression       int  `json:"regression"`
+		Churn            int  `json:"churn"`
+		LegacyGain       int  `json:"legacy_gain"`
+		Discriminating   int  `json:"discriminating"`
+		DebtAge          int  `json:"debt_age"`
+		BlindMutations   int  `json:"blind_mutations"`
+		EBMEligible      bool `json:"ebm_eligible"`
+		EBMFired         bool `json:"ebm_fired"`
+		LocalExecSeen    bool `json:"local_exec_seen"`
+		GovernorEligible bool `json:"governor_eligible"`
+		GovernorEngaged  bool `json:"governor_engaged"`
+	} `json:"outcome_progress"`
+	DelegationAdmission *struct {
+		Tool    string `json:"tool"`
+		Verdict string `json:"verdict"`
+		Reason  string `json:"reason"`
+	} `json:"delegation_admission"`
 	Event *struct {
 		Kind          string `json:"kind"`
 		Code          string `json:"code"`
@@ -135,6 +190,8 @@ type trajectoryRecord struct {
 		Usage *struct {
 			Source           string `json:"source"`
 			PromptTokens     int64  `json:"promptTokens"`
+			CompletionTokens int64  `json:"completionTokens"`
+			ReasoningTokens  int64  `json:"reasoningTokens"`
 			CacheHitTokens   int64  `json:"cacheHitTokens"`
 			CacheMissTokens  int64  `json:"cacheMissTokens"`
 			CacheDiagnostics *struct {
@@ -168,15 +225,19 @@ type roundCall struct {
 }
 
 // gapInfo carries one model gap until its batch closes and can classify it.
+// The cognition fields are the executor tokens streamed during the gap — what
+// the round's thinking actually bought.
 type gapInfo struct {
 	ms                                    int64
 	tainted, planner, compaction, handoff bool
+	reasonTok, complTok, promptTok        int64
 }
 
 // toolBatch accumulates one round's top-level calls between model gaps.
 type toolBatch struct {
 	dispatchTS map[string]int64
 	infos      map[string]*roundCall
+	names      []string
 	calls      int
 	results    int
 	readOnly   int
@@ -253,6 +314,16 @@ func renderTimeAttribution(results []result) string {
 // summarizeTrajectory reads a run's JSONL trajectory. A truncated final line
 // (killed run) is skipped, matching the recorder's durability contract.
 func summarizeTrajectory(path string) (*trajectorySummary, error) {
+	scan, err := scanTrajectoryFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return scan.finish(), nil
+}
+
+// scanTrajectoryFile runs the record pass without finishing, so callers that
+// need the raw series (the live dashboard) can read it before finish folds it.
+func scanTrajectoryFile(path string) (*trajScan, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -260,11 +331,13 @@ func summarizeTrajectory(path string) (*trajectorySummary, error) {
 	defer f.Close()
 
 	scan := &trajScan{
-		s:            &trajectorySummary{Path: path},
-		batch:        newToolBatch(),
-		attemptBegin: map[string]int64{},
-		lastAttempt:  -1,
-		seen:         map[string]bool{},
+		s:                &trajectorySummary{Path: path},
+		batch:            newToolBatch(),
+		attemptBegin:     map[string]int64{},
+		lastAttempt:      -1,
+		seen:             map[string]bool{},
+		denyDelegations:  map[string]bool{},
+		delegationToolMs: map[string]int64{},
 	}
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 1<<20), 16<<20)
@@ -278,7 +351,7 @@ func summarizeTrajectory(path string) (*trajectorySummary, error) {
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
-	return scan.finish(), nil
+	return scan, nil
 }
 
 func (t *trajScan) record(rec trajectoryRecord) {
@@ -297,6 +370,29 @@ func (t *trajScan) record(rec trajectoryRecord) {
 		t.s.ShadowIntent = cs.Intent
 		t.s.ShadowVerdict = cs.Verdict
 		t.s.ShadowComplete = cs.Complete
+	}
+	if cr := rec.CompletionReport; cr != nil {
+		t.s.CompletionVerdict = cr.Verdict
+		t.s.CompletionGaps = cr.Gaps
+		t.s.CompletionGapKinds = cr.GapKinds
+		t.s.ClaimsVerified = cr.ClaimsVerified
+		t.s.ClaimsUnbacked = cr.ClaimsUnbacked
+	}
+	if op := rec.OutcomeProgress; op != nil {
+		t.outcomePoints = append(t.outcomePoints, outcomePoint{
+			ts: rec.TS, exploration: op.Exploration, verification: op.Verification,
+			objective: op.Objective, regression: op.Regression, churn: op.Churn,
+			legacyGain: op.LegacyGain, discriminating: op.Discriminating, debtAge: op.DebtAge,
+			blindMutations: op.BlindMutations, ebmEligible: op.EBMEligible, ebmFired: op.EBMFired,
+			governorEligible: op.GovernorEligible, governorEngaged: op.GovernorEngaged,
+		})
+	}
+	if da := rec.DelegationAdmission; da != nil {
+		t.s.DelegationCalls++
+		if da.Verdict == "deny" {
+			t.s.DelegationDenies++
+			t.denyDelegations[da.Tool] = true
+		}
 	}
 	if rec.Event == nil {
 		return
@@ -363,8 +459,10 @@ func (t *trajScan) closeGap(gap int64) {
 	t.pendingGaps = append(t.pendingGaps, gapInfo{
 		ms: gap, tainted: t.taint != "",
 		planner: t.gapPlanner, compaction: t.gapCompact, handoff: t.gapHandoff,
+		reasonTok: t.gapReason, complTok: t.gapCompl, promptTok: t.gapPrompt,
 	})
 	t.gapPlanner, t.gapCompact, t.gapHandoff = false, false, false
+	t.gapReason, t.gapCompl, t.gapPrompt = 0, 0, 0
 	if t.taint != "" {
 		t.s.RecoveryRounds++
 		t.s.RecoveryGapMs += gap
@@ -423,6 +521,11 @@ func (t *trajScan) recordModelPhase(rec trajectoryRecord) {
 			t.gapPlanner = true
 		case "executor":
 			t.s.ExecutorRequests++
+			t.s.ReasoningTokensTotal += u.ReasoningTokens
+			t.s.CompletionTokensTotal += u.CompletionTokens
+			t.gapReason += u.ReasoningTokens
+			t.gapCompl += u.CompletionTokens
+			t.gapPrompt = max(t.gapPrompt, u.PromptTokens)
 		case "subagent":
 			t.s.SubagentRequests++
 			return
@@ -477,6 +580,7 @@ func (t *trajScan) recordDispatch(rec trajectoryRecord) {
 		if info == nil {
 			info = &roundCall{}
 			t.batch.infos[tl.ID] = info
+			t.batch.names = append(t.batch.names, tl.Name)
 			if tl.Name == "connect_tool_source" {
 				t.s.ConnectCalls++
 			}
@@ -501,6 +605,12 @@ func (t *trajScan) recordResult(rec trajectoryRecord) {
 		if tl.Execution != nil {
 			info.verification = tl.Execution.Verification
 		}
+	}
+	if ex := tl.Execution; ex != nil && (ex.Verification == "passed" || ex.Verification == "failed") {
+		t.observeVerification(tl.Name+"\x00"+tl.Args, ex.Verification == "passed", rec.TS)
+	}
+	if delegationTools[tl.Name] {
+		t.delegationToolMs[tl.Name] += tl.DurationMs
 	}
 	t.batch.serialMs += tl.DurationMs
 	if tl.StartedAt > 0 && tl.EndedAt >= tl.StartedAt {
@@ -527,7 +637,7 @@ func (t *trajScan) closeBatch() {
 		gap := t.pendingGaps[0]
 		t.pendingGaps = t.pendingGaps[1:]
 		if len(b.infos) > 0 {
-			t.recordOutcome(classifyRound(gap, b), gap.ms)
+			t.recordRound(classifyRound(gap, b), gap, b)
 		}
 	}
 	s.ToolBatches++
@@ -561,7 +671,7 @@ func (t *trajScan) finish() *trajectorySummary {
 	t.closeBatch()
 	if t.sawCallIDs {
 		for _, gap := range t.pendingGaps {
-			t.recordOutcome(classifyRound(gap, nil), gap.ms)
+			t.recordRound(classifyRound(gap, nil), gap, nil)
 		}
 	}
 	t.pendingGaps = nil
@@ -587,6 +697,12 @@ func (t *trajScan) finish() *trajectorySummary {
 	s.SpanMs = t.lastTS - t.firstTS
 	if s.ModelMs = s.SpanMs - s.toolWall(); s.ModelMs < 0 {
 		s.ModelMs = 0
+	}
+	s.Outcome = t.summarizeOutcome()
+	// The admission verdict lands after the tool's result in the stream, so
+	// denied time joins by tool name once the whole file is folded.
+	for name := range t.denyDelegations {
+		s.DeniedDelegationMs += t.delegationToolMs[name]
 	}
 	t.decompose()
 	return s
@@ -632,93 +748,6 @@ func newToolBatch() *toolBatch {
 func (b *toolBatch) seen(id string) bool {
 	_, ok := b.dispatchTS[id]
 	return ok
-}
-
-// intervalSpan returns the batch's wall clock (max end − min start) and
-// whether any two intervals actually overlapped (true parallelism).
-func intervalSpan(intervals [][2]int64) (wall int64, overlapped bool) {
-	sorted := append([][2]int64(nil), intervals...)
-	slices.SortFunc(sorted, func(a, b [2]int64) int {
-		switch {
-		case a[0] != b[0]:
-			return int(a[0] - b[0])
-		default:
-			return int(a[1] - b[1])
-		}
-	})
-	minStart, maxEnd := sorted[0][0], sorted[0][1]
-	for _, iv := range sorted[1:] {
-		if iv[0] < maxEnd {
-			overlapped = true
-		}
-		maxEnd = max(maxEnd, iv[1])
-	}
-	return maxEnd - minStart, overlapped
-}
-
-// intervalUnion is the merged length of all intervals, so concurrent tool
-// executions count wall-clock once.
-func intervalUnion(intervals [][2]int64) int64 {
-	return ivsLen(mergeIntervals(intervals))
-}
-
-// mergeIntervals returns a sorted, overlap-free copy of intervals.
-func mergeIntervals(intervals [][2]int64) [][2]int64 {
-	if len(intervals) == 0 {
-		return nil
-	}
-	sorted := append([][2]int64(nil), intervals...)
-	slices.SortFunc(sorted, func(a, b [2]int64) int {
-		switch {
-		case a[0] != b[0]:
-			return int(a[0] - b[0])
-		default:
-			return int(a[1] - b[1])
-		}
-	})
-	out := [][2]int64{sorted[0]}
-	for _, iv := range sorted[1:] {
-		if last := &out[len(out)-1]; iv[0] <= last[1] {
-			last[1] = max(last[1], iv[1])
-			continue
-		}
-		out = append(out, iv)
-	}
-	return out
-}
-
-// clipIntervals returns base minus covered; both are merged internally.
-func clipIntervals(base, covered [][2]int64) [][2]int64 {
-	base = mergeIntervals(base)
-	covered = mergeIntervals(covered)
-	var out [][2]int64
-	j := 0
-	for _, iv := range base {
-		lo := iv[0]
-		for j < len(covered) && covered[j][1] <= lo {
-			j++
-		}
-		for k := j; k < len(covered) && covered[k][0] < iv[1]; k++ {
-			if covered[k][0] > lo {
-				out = append(out, [2]int64{lo, covered[k][0]})
-			}
-			if lo = max(lo, covered[k][1]); lo >= iv[1] {
-				break
-			}
-		}
-		if lo < iv[1] {
-			out = append(out, [2]int64{lo, iv[1]})
-		}
-	}
-	return out
-}
-
-func ivsLen(intervals [][2]int64) int64 {
-	var total int64
-	for _, iv := range intervals {
-		total += iv[1] - iv[0]
-	}
-	return total
 }
 
 // durMs renders small durations without the sub-second floor dur applies.

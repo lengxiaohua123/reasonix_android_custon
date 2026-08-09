@@ -8,7 +8,10 @@ LDFLAGS := -s -w \
 GOEXE := $(shell go env GOEXE)
 ANDROID_ARCH ?= arm64
 
-.PHONY: build android vet fmt lint lint-cross lint-update test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
+# One pin for the Makefile and the CI lint job; see .github/workflows/ci.yml.
+GOLANGCI_VERSION := $(shell cat .golangci-version)
+
+.PHONY: build android vet fmt lint lint-go lint-install lint-cross lint-update test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/reasonix$(GOEXE) ./cmd/reasonix
@@ -24,8 +27,22 @@ vet:
 fmt:
 	gofmt -w .
 
-lint:
+# Both gates CI runs, at the version CI pins. Skipping golangci-lint locally
+# trades a second here for a ten-minute CI round trip: `modernize` findings in
+# particular never surface in `go vet`.
+lint: lint-go
 	go run ./tools/repolint
+
+lint-go:
+	@command -v golangci-lint >/dev/null || { echo "golangci-lint not installed; run: make lint-install"; exit 1; }
+	@have=$$(golangci-lint version --short 2>/dev/null); want=$$(echo "$(GOLANGCI_VERSION)" | sed 's/^v//'); \
+		[ "$$have" = "$$want" ] || echo "warning: local golangci-lint $$have, CI pins $$want (make lint-install)"
+	golangci-lint run --timeout=5m ./...
+
+# CGO_ENABLED=0 keeps the install working where a stray clang on PATH shadows
+# the toolchain and breaks runtime/cgo.
+lint-install:
+	CGO_ENABLED=0 go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_VERSION)
 
 lint-update:
 	go run ./tools/repolint -update

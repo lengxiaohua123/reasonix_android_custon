@@ -140,6 +140,105 @@ func TestSetPreferredExternalOpenerRejectsRendererCommands(t *testing.T) {
 	}
 }
 
+func TestLocalSaveDestinationIsSourceDetectsFilesystemAliases(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "Readme.md")
+	if err := os.WriteFile(source, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hardLink := filepath.Join(dir, "readme-hardlink.md")
+	if err := os.Link(source, hardLink); err != nil {
+		t.Fatalf("create hard link: %v", err)
+	}
+	if same, err := localSaveDestinationIsSource(info, hardLink); err != nil || !same {
+		t.Fatalf("hard-link alias = (%v, %v), want (true, nil)", same, err)
+	}
+
+	symlink := filepath.Join(dir, "readme-symlink.md")
+	if err := os.Symlink(source, symlink); err == nil {
+		if same, err := localSaveDestinationIsSource(info, symlink); err != nil || !same {
+			t.Fatalf("symlink alias = (%v, %v), want (true, nil)", same, err)
+		}
+	}
+
+	missing := filepath.Join(dir, "new-copy.md")
+	if same, err := localSaveDestinationIsSource(info, missing); err != nil || same {
+		t.Fatalf("missing destination = (%v, %v), want (false, nil)", same, err)
+	}
+}
+
+func TestCopyLocalPathAsRejectsAliasWithoutChangingSource(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.md")
+	alias := filepath.Join(dir, "alias.md")
+	content := []byte("source content")
+	if err := os.WriteFile(source, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(source, alias); err != nil {
+		t.Fatalf("create hard link: %v", err)
+	}
+	if err := copyLocalPathAs(source, alias); err == nil {
+		t.Fatal("copyLocalPathAs(alias) succeeded, want same-source error")
+	}
+	if got, err := os.ReadFile(source); err != nil || !reflect.DeepEqual(got, content) {
+		t.Fatalf("source after rejected alias copy = (%q, %v), want original content", got, err)
+	}
+}
+
+func TestCopyLocalPathAsReplacesDestinationWithoutChangingSource(t *testing.T) {
+	dir := t.TempDir()
+	source := filepath.Join(dir, "source.md")
+	target := filepath.Join(dir, "target.md")
+	sourceContent := []byte("source content")
+	if err := os.WriteFile(source, sourceContent, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(target, []byte("old destination"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := copyLocalPathAs(source, target); err != nil {
+		t.Fatalf("copyLocalPathAs = %v", err)
+	}
+	if got, err := os.ReadFile(target); err != nil || !reflect.DeepEqual(got, sourceContent) {
+		t.Fatalf("destination after copy = (%q, %v), want source content", got, err)
+	}
+	if got, err := os.ReadFile(source); err != nil || !reflect.DeepEqual(got, sourceContent) {
+		t.Fatalf("source after copy = (%q, %v), want unchanged source", got, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".target.md.reasonix-copy-") {
+			t.Fatalf("temporary copy was not cleaned up: %s", entry.Name())
+		}
+	}
+}
+
+func TestExternalOpenerLaunchPathUsesParentForTerminalFiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "report.md")
+	if err := os.WriteFile(path, []byte("report"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	terminal := externalOpenerSpec{View: ExternalOpenerView{Kind: externalOpenerTerminal}, LaunchMode: "application"}
+	if got := externalOpenerLaunchPath(terminal, path); got != dir {
+		t.Fatalf("terminal launch path = %q, want parent directory %q", got, dir)
+	}
+	editor := externalOpenerSpec{View: ExternalOpenerView{Kind: externalOpenerEditor}, LaunchMode: "application"}
+	if got := externalOpenerLaunchPath(editor, path); got != path {
+		t.Fatalf("editor launch path = %q, want file %q", got, path)
+	}
+}
+
 func TestExternalOpenerIconFileDataURLAcceptsBoundedImages(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "icon.png")
 	if err := os.WriteFile(path, []byte("png-data"), 0o600); err != nil {

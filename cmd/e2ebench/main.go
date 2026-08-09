@@ -31,7 +31,17 @@ type task struct {
 	Class      string `toml:"class" json:"class,omitempty"`
 	MaxSteps   int    `toml:"max_steps"`
 	TimeoutSec int    `toml:"timeout_sec"`
-	dir        string
+	// NoSolution declares that no reachable solution exists: the task leaves
+	// every accuracy denominator and is scored on honesty instead, and its
+	// verify.sh grades the inverse contract. See benchmarks/README.md.
+	NoSolution bool `toml:"no_solution" json:"no_solution,omitempty"`
+	// MemoryMarkers are unique tokens planted in seeded fact bodies; a marker
+	// found in tool args or answer text after a recall proves point of use.
+	MemoryMarkers []string `toml:"memory_markers" json:"memory_markers,omitempty"`
+	// MemoryMarkersPrefix marks tasks whose seeded facts are pinned: their
+	// bodies arrive via the stable prefix, so markers count from turn one.
+	MemoryMarkersPrefix bool `toml:"memory_markers_prefix" json:"memory_markers_prefix,omitempty"`
+	dir                 string
 }
 
 type runMetrics struct {
@@ -94,6 +104,14 @@ type result struct {
 	Passed  bool
 	Skipped bool
 	Note    string
+	// Memory shadow: recall decisions and point-of-use evidence extracted from
+	// the trajectory (see memorybench.go). Zero for suites without seeds.
+	MemoryRecallEvents int `json:"memory_recall_events,omitempty"`
+	MemoryRecallHits   int `json:"memory_recall_hits,omitempty"`
+	MemoryRecallChars  int `json:"memory_recall_chars,omitempty"`
+	MemorySuppressed   int `json:"memory_suppressed,omitempty"`
+	MemoryMarkersUsed  int `json:"memory_markers_used,omitempty"`
+	MemoryShadowAgree  int `json:"memory_shadow_agree,omitempty"`
 	// WallMs is the harness's own clock, not the agent's self-report, so the
 	// number stays comparable when the same suite runs against another harness.
 	WallMs int64 `json:"wall_ms"`
@@ -106,6 +124,10 @@ type result struct {
 	// agent was killed. The numbers are real but stop at the last snapshot, so
 	// they are counted as lower bounds rather than dropped.
 	Partial bool `json:"partial"`
+	// Meter is what the neutral proxy observed for this run, when metering was
+	// on. It is the authority for cross-harness spend; runMetrics is the
+	// harness's own account, kept only to be checked against it.
+	Meter *meterUsage `json:"meter,omitempty"`
 	// Trajectory is the digest of the run's recorded event trajectory; nil
 	// unless the harness ran with -trajectories.
 	Trajectory *trajectorySummary `json:"trajectory,omitempty"`
@@ -188,7 +210,8 @@ func main() {
 		fmt.Fprintf(flag.CommandLine.Output(), "  %[1]s -profile delivery\n", strings.Replace(flag.CommandLine.Name(), "e2ebench", "go run ./cmd/e2ebench", 1))
 	}
 
-	mode := flag.String("mode", "suite", "suite | diff | swebench | compare | traj")
+	mode := flag.String("mode", "suite", "suite | diff | swebench | compare | traj | serve | fork")
+	addr := flag.String("addr", "127.0.0.1:7480", "serve mode: live dashboard listen address")
 	subset := flag.String("subset", "benchmarks/swebench/subset.json", "swebench mode: instance subset file")
 	namespace := flag.String("namespace", "swebench", "swebench mode: registry namespace holding the evaluation images")
 	runID := flag.String("run-id", "reasonix", "swebench mode: run id passed to the official harness")
@@ -204,6 +227,13 @@ func main() {
 	cacheArm := flag.String("cache", "cold", "suite mode: cold (fresh session per task) | warm (prefix-warming one-step run in the same workdir before the graded run)")
 	effort := flag.String("effort", "", "reasoning effort override passed to the agent (model-specific levels, e.g. disabled|low|high|max); empty = model default")
 	checkpoints := flag.Bool("checkpoints", false, "suite mode: snapshot the workdir on every change and grade each snapshot offline after the run, yielding first_correct_ms (TTFCS) and post_solve_waste_ms")
+	meterConfig := flag.String("meter", "", "suite mode: route the benchmarked provider through the neutral measuring proxy, using this config.toml as the source (e.g. ~/.reasonix/config.toml). Spend is then counted at the request boundary instead of trusted from the harness")
+	faultSpec := flag.String("faults", "", "suite mode: inject provider failures at fixed request indices, e.g. 3:429,7:500 (requires -meter)")
+	policyFlag := flag.String("policy", "", "suite mode: experiment arm — empty (baseline) | ebm (evidence-before-more-mutation nudge) | governor (exploration-phase reasoning governor) | memory-off (hide the memory store: MemoryBench counterfactual arm)")
+	forkCapture := flag.String("fork-capture", "", "suite mode: capture a fork bundle per task at first EBM eligibility into <dir>/<task-id>")
+	bundles := flag.String("bundles", "", "fork mode: directory of captured bundles (<task-id>/bundle.json)")
+	forkArms := flag.String("arm", "control,treatment", "fork mode: comma-separated continuation arms (control | treatment)")
+	forkReps := flag.Int("reps", 1, "fork mode: continuation repetitions per bundle per arm")
 	bin := flag.String("bin", "reasonix", "path to the reasonix binary")
 	model := flag.String("model", "", "provider/model name (default: config default)")
 	profileFlag := flag.String("profile", benchmarkProfileBaseline, "prompt profile: baseline | delivery")
@@ -256,6 +286,20 @@ func main() {
 	case "traj":
 		emitTrajMode(*trajDir, *outMD)
 		return
+	case "serve":
+		if err := runServeMode(*trajDir, *suite, *addr); err != nil {
+			fmt.Fprintln(os.Stderr, "serve mode:", err)
+			os.Exit(1)
+		}
+		return
+	case "fork":
+		cfg := suiteConfig{bin: *bin, model: *model, profile: profile, arm: arm,
+			cacheArm: cache, effort: *effort, policy: *policyFlag}
+		if err := runForkMode(*bundles, *suite, *forkArms, *forkReps, cfg, *trajDir, *outMD, *outJSON); err != nil {
+			fmt.Fprintln(os.Stderr, "fork mode:", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	if *mode == "diff" {
@@ -267,10 +311,12 @@ func main() {
 		return
 	}
 
+	meterSource, faults := meterSettings(*meterConfig, *faultSpec)
 	runSuiteMode(suiteConfig{
 		bin: *bin, model: *model, profile: profile, arm: arm, budget: *budget,
 		trajDir: *trajDir, forcePlanner: *forcePlanner, attempts: *attempts,
-		cacheArm: cache, effort: *effort, checkpoints: *checkpoints,
+		cacheArm: cache, effort: *effort, checkpoints: *checkpoints, policy: *policyFlag,
+		forkCapture: *forkCapture, meterConfig: meterSource, meterFaults: faults,
 	}, *suite, *taskFilter, *outMD, *outJSON)
 }
 
@@ -402,9 +448,14 @@ func filterTasks(tasks []task, filter string) ([]task, error) {
 type suiteConfig struct {
 	bin, model, profile, cacheArm, effort string
 	arm                                   ablation.Set
+	policy, forkCapture                   string
 	trajDir                               string
 	forcePlanner, checkpoints             bool
 	attempts, budget                      int
+	// meterConfig is the real config.toml whose provider endpoint each run is
+	// redirected through the neutral meter; empty leaves runs unmetered.
+	meterConfig string
+	meterFaults map[int]int
 }
 
 // runSuite runs each task in order until the token budget is exhausted;
@@ -487,18 +538,22 @@ func runTask(cfg suiteConfig, t task) result {
 
 	cmd := exec.CommandContext(ctx, cfg.bin, args...)
 	cmd.Dir = work
+	extraEnv, seedNote := taskExperimentEnv(cfg, t, work)
+	if seedNote != "" {
+		r.Note = seedNote
+	}
+	mtr := attachMeter(cfg, &r)
+	defer mtr.close()
+	extraEnv = append(extraEnv, mtr.env...)
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
+	}
 	cmd.Stdout = os.Stderr // stream the run to the job log, keep stdout clean for the report
 	cmd.Stderr = os.Stderr
 	cmd.WaitDelay = 10 * time.Second // bound the wait for a stuck child after ctx timeout
 	startedAt := time.Now()
-	var snap *snapshotter
-	if cfg.checkpoints {
-		snapDir, err := os.MkdirTemp("", "e2ebench-cp-"+t.ID+"-")
-		if err == nil {
-			defer os.RemoveAll(snapDir)
-			snap = startSnapshotter(work, snapDir, startedAt)
-		}
-	}
+	snap, dropSnapshots := attachSnapshotter(cfg, t, work, startedAt)
+	defer dropSnapshots()
 	runErr := cmd.Run()
 	r.WallMs = time.Since(startedAt).Milliseconds()
 	var taken []checkpoint
@@ -509,10 +564,12 @@ func runTask(cfg suiteConfig, t task) result {
 	if m, err := readMetrics(metricsPath); err == nil {
 		r.runMetrics = m
 	}
+	mtr.record(&r)
 	if trajPath != "" {
 		if summary, err := summarizeTrajectory(trajPath); err == nil {
 			r.Trajectory = summary
 		}
+		applyMemoryStats(&r, trajPath, t)
 	}
 	// A killed child never writes metrics, so the deadline is the only place
 	// this failure mode is still observable.

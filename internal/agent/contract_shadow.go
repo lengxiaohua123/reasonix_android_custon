@@ -3,6 +3,7 @@ package agent
 import (
 	"fmt"
 
+	"reasonix/internal/completion"
 	"reasonix/internal/event"
 	"reasonix/internal/evidence"
 	"reasonix/internal/taskcontract"
@@ -83,12 +84,14 @@ func intentName(i taskintent.Intent) string {
 	}
 }
 
-// emitContractShadow records the shadow contract's end-of-turn summary; the
-// contract observed the turn and decided nothing.
-func (a *Agent) emitContractShadow(input string) {
+// emitTurnShadows records the end-of-turn shadow observations from one replay
+// of the turn's receipts: the contract's state, and the completion report
+// derived from it. Both observe; neither decides.
+func (a *Agent) emitTurnShadows(input string) {
 	if a.evidence == nil {
 		return
 	}
 	c := buildShadowContract(input, a.evidence.Receipts())
 	event.RecordContractShadow(a.sink, contractShadowAudit(c))
+	event.RecordCompletionReport(a.sink, completionReportAudit(completion.Build(c, a.evidence)))
 }

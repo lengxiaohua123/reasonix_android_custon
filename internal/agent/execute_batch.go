@@ -446,7 +446,7 @@ func partitionToolCalls(r *tool.Registry, calls []provider.ToolCall) []toolCallB
 
 func parallelisable(r *tool.Registry, name string) bool {
 	switch name {
-	case "complete_step", "todo_write", "wait", "bash_output", "use_capability":
+	case "complete_step", "todo_write", "wait", "bash_output", "use_capability", "compress":
 		return false
 	}
 	t, _, ambiguous := r.ResolveCall(name)

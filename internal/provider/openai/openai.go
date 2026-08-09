@@ -90,14 +90,13 @@ func New(cfg provider.Config) (provider.Provider, error) {
 	headers, _ := cfg.Extra["headers"].(map[string]string)
 	extraBody, _ := cfg.Extra["extra_body"].(map[string]any)
 	vision, _ := cfg.Extra["vision"].(bool)
-	explicitModelVision, _ := cfg.Extra["vision_model_explicit"].(bool)
 	officialDeepSeek := IsDeepSeek(cfg.BaseURL)
 	// DeepSeek's official chat API accepts string message content only. Keep
 	// this provider-boundary guard even though config capability resolution
-	// normally prevents image attachments from reaching this layer. A positive
-	// model-scoped capability can opt in without letting stale provider-wide
-	// vision=true settings affect current text-only models.
-	vision = vision && (!officialDeepSeek || explicitModelVision)
+	// normally prevents image attachments from reaching this layer. No persisted
+	// or extension-supplied capability flag may override the endpoint's current
+	// wire contract; future native vision support needs an explicit serializer.
+	vision = vision && !officialDeepSeek
 	visionDetail, _ := cfg.Extra["vision_detail"].(string)
 	visionDetail = strings.ToLower(strings.TrimSpace(visionDetail))
 	if visionDetail != "low" && visionDetail != "high" {
@@ -110,15 +109,7 @@ func New(cfg provider.Config) (provider.Provider, error) {
 	zhipu := protocol == "glm" || (protocol == "" && IsZhipu(cfg.BaseURL))
 	longcat := protocol == "" && IsLongCat(cfg.BaseURL)
 	ollamaCloud := protocol == "" && IsOllamaCloud(cfg.BaseURL)
-	// Optional explicit `thinking` config field — a vendor-agnostic escape hatch
-	// (credit @eghrhegpe, #5063) for OpenAI-compatible providers we don't
-	// auto-detect (e.g. opencode.ai). "enabled"/"disabled" drive thinking.type;
-	// anything else is ignored so an unknown value never breaks a request.
-	thinkingType, _ := cfg.Extra["thinking"].(string)
-	thinkingType = strings.ToLower(strings.TrimSpace(thinkingType))
-	if thinkingType != "enabled" && thinkingType != "disabled" {
-		thinkingType = ""
-	}
+	thinkingType := configuredThinkingType(cfg)
 	switch {
 	case protocol == "none":
 		effort = ""
@@ -224,6 +215,10 @@ func New(cfg provider.Config) (provider.Provider, error) {
 			return nil, fmt.Errorf("openai: provider %q: effort must be low, medium, or high", name)
 		}
 	}
+	requestEfforts := requestEffortVocabulary(effortEndpoint{protocol: protocol,
+		thinkingType: thinkingType, effort: effort, deepseek: deepseek, flash: deepseekV4Flash,
+		minimax: minimax, zhipu: zhipu, longcat: longcat, ollamaCloud: ollamaCloud,
+		explicit: hasExplicitEfforts, supported: supportedEfforts})
 	// The automatic cap protects DeepSeek reasoning, not ordinary long-form
 	// output. Preserve an explicit user budget in either mode, but leave a
 	// thinking-disabled request uncapped unless the user configured one.
@@ -256,29 +251,10 @@ func New(cfg provider.Config) (provider.Provider, error) {
 		visionDetail:    visionDetail,
 		maxOutputTokens: maxOutputTokens,
 		effort:          effort,
+		requestEfforts:  requestEfforts,
 		http:            httpClient,
 		idleTimeout:     defaultStreamIdleTimeout,
 	}, nil
-}
-
-func supportsEffort(levels []string, want string) bool {
-	want = strings.ToLower(strings.TrimSpace(want))
-	for _, level := range levels {
-		if strings.ToLower(strings.TrimSpace(level)) == want {
-			return true
-		}
-	}
-	return false
-}
-
-func hasExplicitSupportedEfforts(levels []string) bool {
-	for _, level := range levels {
-		level = strings.ToLower(strings.TrimSpace(level))
-		if level != "" && level != "auto" {
-			return true
-		}
-	}
-	return false
 }
 
 func newHTTPClient(cfg provider.Config) (*http.Client, error) {
@@ -314,6 +290,7 @@ type client struct {
 	visionDetail    string        // image_url detail hint (low|high); "" = auto/omit
 	maxOutputTokens int           // configured/default total output budget; <=0 omits the optional field
 	effort          string        // reasoning_effort for OpenAI; thinking.type for MiniMax; "" = auto/provider default
+	requestEfforts  []string      // depth levels a per-request EffortOverride may take; empty = overrides ignored
 	idleTimeout     time.Duration // SSE stall watchdog window; defaultStreamIdleTimeout unless a test overrides
 	authed          atomic.Bool   // a request has succeeded — gate transient-401 retry
 }
@@ -808,7 +785,7 @@ func (c *client) buildRequest(req provider.Request) chatRequest {
 		StreamOptions:   &streamOptions{IncludeUsage: true},
 		Temperature:     req.Temperature,
 		MaxTokens:       maxOutputTokens,
-		ReasoningEffort: kimiK3ReasoningEffort(c.kimiK3, c.effort),
+		ReasoningEffort: kimiK3ReasoningEffort(c.kimiK3, c.requestEffort(req)),
 		ExtraBody:       c.extraBody,
 	}
 	switch {
