@@ -104,20 +104,21 @@ jobs:
         run: |
           TAG="${{ steps.upstream.outputs.tag }}"
           REL_TAG="termux-$TAG"
+          printf '%s\n' \
+            "Automatic Termux build of upstream [$TAG](https://github.com/esengine/DeepSeek-Reasonix/releases/tag/$TAG) with the Termux adaptation patch." \
+            "" \
+            "- **reasonix-android-arm64**: prebuilt binary (GOOS=android GOARCH=arm64, version $TAG)" \
+            "- **reasonix-termux.patch**: the adaptation patch (16 files)" \
+            "- **update-reasonix.sh**: rebuild/update script" \
+            "" \
+            "Install:" \
+            '```' \
+            "cp reasonix-android-arm64 \$PREFIX/bin/reasonix" \
+            "reasonix -v" \
+            '```' > notes.md
           gh release create "$REL_TAG" \
             "$GITHUB_WORKSPACE/upstream/bin/reasonix-android-arm64" \
             "$GITHUB_WORKSPACE/reasonix-termux.patch" \
             "$GITHUB_WORKSPACE/update-reasonix.sh" \
             --title "Reasonix $TAG — Termux build" \
-            --notes |-
-              Automatic Termux build of upstream [$TAG](https://github.com/esengine/DeepSeek-Reasonix/releases/tag/$TAG) with the Termux adaptation patch.
-
-              - **reasonix-android-arm64**: prebuilt binary (GOOS=android GOARCH=arm64, version $TAG)
-              - **reasonix-termux.patch**: the adaptation patch (16 files)
-              - **update-reasonix.sh**: rebuild/update script
-
-              Install:
-              \`\`\`
-              cp reasonix-android-arm64 \$PREFIX/bin/reasonix
-              reasonix -v
-              \`\`\`
+            --notes-file notes.md
