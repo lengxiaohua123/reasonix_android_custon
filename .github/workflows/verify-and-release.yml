@@ -28,7 +28,7 @@ jobs:
         id: info
         run: |
           UPSTREAM="$(git ls-remote --tags --refs https://github.com/esengine/DeepSeek-Reasonix.git \
-            | awk -F/ '{print $NF}' | grep -v -- '-rc' | sort -V | tail -1)"
+            | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.' | grep -v -- '-rc' | sort -V | tail -1)"
           VERSION="$(go version -m artifacts/reasonix-android-arm64 | awk '/main.version/{print $2}')"
           HASH="$(sha256sum artifacts/reasonix-android-arm64 | awk '{print $1}')"
           echo "upstream=$UPSTREAM"

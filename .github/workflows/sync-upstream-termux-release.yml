@@ -29,7 +29,7 @@ jobs:
         id: upstream
         run: |
           TAG="$(git ls-remote --tags --refs https://github.com/esengine/DeepSeek-Reasonix.git \
-            | awk -F/ '{print $NF}' | grep -v -- '-rc' | sort -V | tail -1)"
+            | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.' | grep -v -- '-rc' | sort -V | tail -1)"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "Latest upstream tag: $TAG"
 
