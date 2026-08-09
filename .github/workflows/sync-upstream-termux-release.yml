@@ -63,6 +63,7 @@ jobs:
           # Replace everything except repo-specific files with upstream+patch.
           find . -mindepth 1 -maxdepth 1 \
             ! -name .git ! -name .github ! -name .gitignore ! -name upstream \
+            ! -name artifacts \
             ! -name reasonix-termux.patch ! -name update-reasonix.sh \
             -exec rm -rf {} +
           rsync -a --exclude='.git' --exclude='.github' --exclude='.gitignore' \
