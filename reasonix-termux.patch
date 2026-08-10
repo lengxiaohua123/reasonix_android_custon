@@ -26,6 +26,23 @@ index cdfa6d1..ef9ac4d 100644
  vet:
  	go vet ./...
  
+diff --git a/cmd/e2ebench/segmentrun_test.go b/cmd/e2ebench/segmentrun_test.go
+index b653e8f..529cde8 100644
+--- a/cmd/e2ebench/segmentrun_test.go
++++ b/cmd/e2ebench/segmentrun_test.go
+@@ -17,6 +17,12 @@ func requireShellStub(t *testing.T) {
+ 	if runtime.GOOS == "windows" {
+ 		t.Skip("the stub agent is a shell script")
+ 	}
++	// The stub's shebang is #!/usr/bin/env bash; Termux (Android) has no
++	// /usr/bin/env, so the exec would fail with ENOENT instead of testing
++	// segment accounting.
++	if _, err := os.Stat("/usr/bin/env"); err != nil {
++		t.Skip("stub shebang needs /usr/bin/env (absent on Termux)")
++	}
+ }
+ 
+ // fakeAgent stands in for the reasonix binary: it records every invocation's
 diff --git a/internal/agent/compact.go b/internal/agent/compact.go
 index b8413aa..651eab6 100644
 --- a/internal/agent/compact.go
@@ -269,6 +286,29 @@ index 9185928..46df723 100644
  
  package mcplaunch
  
+diff --git a/internal/memory/memory_test.go b/internal/memory/memory_test.go
+index 00aa978..4a18f9a 100644
+--- a/internal/memory/memory_test.go
++++ b/internal/memory/memory_test.go
+@@ -5,6 +5,7 @@ import (
+ 	"path/filepath"
+ 	"strings"
+ 	"testing"
++	"time"
+ 
+ 	fileencoding "reasonix/internal/fileutil/encoding"
+ )
+@@ -68,6 +69,10 @@ func TestLoadIncludesStableGlobalPreferencesAndFeedback(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 	legacyFeedback := "---\nname: zeta-feedback\ndescription: legacy global feedback\nmetadata:\n  type: feedback\n---\n\nGLOBAL FEEDBACK BODY\n"
++	// Termux's filesystem stores mtimes at ~1ms granularity; without this
++	// pause the legacy file's mtime can land in the same millisecond as the
++	// Save above, making the most-recently-updated sort ambiguous.
++	time.Sleep(2 * time.Millisecond)
+ 	mustWrite(t, filepath.Join(store.GlobalDir, "zeta-feedback.md"), legacyFeedback)
+ 	if err := reindexIn(store.GlobalDir, "zeta-feedback", Memory{Name: "zeta-feedback", Description: "legacy global feedback", Type: TypeFeedback, Scope: FactScopeGlobal}); err != nil {
+ 		t.Fatal(err)
 diff --git a/internal/notify/sender_android.go b/internal/notify/sender_android.go
 new file mode 100644
 index 0000000..07c0d5d
