@@ -1,8 +1,8 @@
 diff --git a/Makefile b/Makefile
-index 1908482..7d85a54 100644
+index cdfa6d1..ef9ac4d 100644
 --- a/Makefile
 +++ b/Makefile
-@@ -6,15 +6,21 @@ LDFLAGS := -s -w \
+@@ -6,16 +6,22 @@ LDFLAGS := -s -w \
  	-X main.gitCommit=$(GIT_COMMIT) \
  	-X main.buildTimeUTC=$(BUILD_TIME_UTC)
  GOEXE := $(shell go env GOEXE)
@@ -10,9 +10,10 @@ index 1908482..7d85a54 100644
 +
  # One pin for the Makefile and the CI lint job; see .github/workflows/ci.yml.
  GOLANGCI_VERSION := $(shell cat .golangci-version)
+ WAILS_VERSION := $(shell tr -d '[:space:]' < .wails-version)
  
--.PHONY: build vet fmt lint lint-go lint-install lint-cross lint-update test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
-+.PHONY: build android vet fmt lint lint-go lint-install lint-cross lint-update test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
+-.PHONY: build vet fmt lint lint-go lint-install lint-cross lint-update wails-install test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
++.PHONY: build android vet fmt lint lint-go lint-install lint-cross lint-update wails-install test desktop-test desktop-test-short desktop-test-times sdk-test sdk-test-race hooks cross clean
  
  build:
  	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/reasonix$(GOEXE) ./cmd/reasonix
@@ -25,6 +26,21 @@ index 1908482..7d85a54 100644
  vet:
  	go vet ./...
  
+diff --git a/internal/agent/compact.go b/internal/agent/compact.go
+index b8413aa..651eab6 100644
+--- a/internal/agent/compact.go
++++ b/internal/agent/compact.go
+@@ -686,7 +686,9 @@ func archiveMessages(dir string, msgs []provider.Message) (string, error) {
+ 	if err := f.Close(); err != nil {
+ 		return "", err
+ 	}
+-	if err := os.Link(tmpName, path); err != nil {
++	// Android (Termux) denies hard links; linkFileNoReplace falls back
++	// to an exclusive copy that keeps the no-replace guarantee.
++	if err := linkFileNoReplace(tmpName, path); err != nil {
+ 		if os.IsExist(err) {
+ 			return path, nil
+ 		}
 diff --git a/internal/agent/migrate.go b/internal/agent/migrate.go
 index 0dcb840..2762142 100644
 --- a/internal/agent/migrate.go
@@ -93,7 +109,7 @@ index 0846a1a..69ff924 100644
  		return exec.Command("xdg-open", target), nil
  	}
 diff --git a/internal/cli/remote_connect.go b/internal/cli/remote_connect.go
-index 027e162..3eee4ed 100644
+index 5e2a4eb..f9e7cba 100644
 --- a/internal/cli/remote_connect.go
 +++ b/internal/cli/remote_connect.go
 @@ -730,6 +730,13 @@ func openInBrowser(url string) error {
