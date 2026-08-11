@@ -92,7 +92,7 @@ fi
 log "上传二进制到仓库 artifacts/"
 ART_DIR="$SCRIPT_DIR/artifacts"
 mkdir -p "$ART_DIR"
-cp "$BIN" "$ART_DIR/reasonix"
+cp "$BIN" "$ART_DIR/reasonix-android-arm64"
 cd "$SCRIPT_DIR"
 git add artifacts/reasonix-android-arm64
 if git commit -m "upload reasonix-android-arm64 $TAG" >/dev/null 2>&1; then
