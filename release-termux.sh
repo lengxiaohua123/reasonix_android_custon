@@ -32,12 +32,8 @@ fi
 export GOMAXPROCS="${GOMAXPROCS:-4}"
 
 # 1. 解析上游 tag
-TAG="1.22.0"
-:<<COMMENT
-if [ -z "$TAG" ]; then
-  TAG="$(git ls-remote --tags --refs https://github.com/esengine/DeepSeek-Reasonix.git \
+TAG="$(git ls-remote --tags --refs https://github.com/esengine/DeepSeek-Reasonix.git \
     | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.' | grep -v -- '-rc' | sort -V | tail -1)"
-fi
 REL_TAG="termux-$TAG"
 log "上游 tag: $TAG → release: $REL_TAG"
 
@@ -92,7 +88,6 @@ if [ "${SKIP_TESTS:-0}" != "1" ]; then
     exit 1
   fi
 fi
-COMMENT
 # 5. 上传二进制到仓库(发布由 GitHub Action 校验版本/hash 后完成)
 log "上传二进制到仓库 artifacts/"
 ART_DIR="$SCRIPT_DIR/artifacts"
