@@ -193,6 +193,7 @@ func renderBody(results []result) string {
 	b.WriteString(perSolvedLine(s))
 	b.WriteString(requestsBySourceLine(s.bySource))
 	b.WriteString(renderMeterAccounting(results))
+	b.WriteString(renderFaultRecovery(results))
 	b.WriteString(renderTimeAttribution(results))
 	b.WriteString(renderSolveProfiles(results))
 	b.WriteString(renderToolSurface(results))
@@ -202,6 +203,8 @@ func renderBody(results []result) string {
 	b.WriteString(renderOutcomeProgress(results))
 	b.WriteString(renderMemoryShadow(results))
 	b.WriteString(renderCognition(results))
+	b.WriteString(renderAnchor(results))
+	b.WriteString(renderDelegation(results))
 	b.WriteString(renderDelegationAdmission(results))
 	b.WriteString(renderMechanismLedger(results))
 	if s.unaccounted > 0 {

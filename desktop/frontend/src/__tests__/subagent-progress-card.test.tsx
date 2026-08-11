@@ -9,9 +9,9 @@ import { registerHooks } from "node:module";
 import React from "react";
 import { act } from "react";
 import { createRoot } from "react-dom/client";
-import gsap from "gsap";
 import { ToolCard } from "../components/ToolCard";
 import { LocaleProvider } from "../lib/i18n";
+import { hydrateReasoningDisplayMode } from "../lib/reasoningDisplayPreference";
 import { setReasoningSummaryEnabled } from "../lib/reasoningSummaryPreference";
 import type { Item, SubagentProgress } from "../lib/useController";
 
@@ -25,28 +25,6 @@ registerHooks({
 });
 
 type ToolItem = Extract<Item, { kind: "tool" }>;
-
-// jsdom has no layout engine: stub the GSAP tween surface the collapse hook
-// touches so layout effects complete synchronously. Under tsx the imported
-// binding is a CJS interop object, so the stubs must go onto that object
-// itself (the hook imports the same binding).
-type GsapToOptions = { onComplete?: () => void };
-const gsapForTests = gsap as unknown as {
-  to: (target: unknown, vars: GsapToOptions) => unknown;
-  fromTo: (target: unknown, from: unknown, vars: GsapToOptions) => unknown;
-  set: (target: unknown, vars: unknown) => unknown;
-  killTweensOf: (target: unknown) => void;
-};
-gsapForTests.to = (_target: unknown, vars: GsapToOptions) => {
-  vars.onComplete?.();
-  return {};
-};
-gsapForTests.fromTo = (_target: unknown, _from: unknown, vars: GsapToOptions) => {
-  vars.onComplete?.();
-  return {};
-};
-gsapForTests.set = () => ({});
-gsapForTests.killTweensOf = () => {};
 
 let passed = 0;
 let failed = 0;
@@ -118,6 +96,25 @@ function makeItem(phase: SubagentProgress["phase"], over: Partial<SubagentProgre
 }
 
 console.log("\nsubagent progress card");
+
+{
+  const dom = installDom();
+  const rootEl = document.getElementById("root");
+  if (!rootEl) throw new Error("missing root");
+  const root = createRoot(rootEl);
+  hydrateReasoningDisplayMode("auto", true);
+  await act(async () => {
+    root.render(React.createElement(LocaleProvider, null, React.createElement(ToolCard, { item: makeItem("reasoning") })));
+    for (let i = 0; i < 50; i += 1) {
+      await flushTimers();
+      if (document.querySelector(".tool__subagent-preview .md")) break;
+    }
+  });
+  ok(!!document.querySelector(".tool__subagent-preview .md"), "auto mode expands reasoning when the card mounts mid-stream");
+  await act(async () => root.unmount());
+  dom.window.close();
+  hydrateReasoningDisplayMode("summary", true);
+}
 
 {
   const dom = installDom();

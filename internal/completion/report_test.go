@@ -220,3 +220,33 @@ func TestSummaryCountsRequiredCriteriaOnly(t *testing.T) {
 		t.Fatalf("summary = %q, want required-only criteria counts", got)
 	}
 }
+
+// Listing every earlier form of the same check after a green run is pedantry,
+// and pedantry is how a receipt teaches people to skip it.
+func TestStaleCommandIsNotAGapOnceSomethingFreshPassed(t *testing.T) {
+	rep := Build(nil, ledgerOf(
+		ran("python3 -m pytest -q", true),
+		wrote("parser.go"),
+		read("parser.go"),
+		ran("python3 -m unittest discover", true),
+	))
+	if got := gapKinds(rep); len(got) != 0 {
+		t.Fatalf("gap kinds = %v, want none: the fresh run proved the tree", got)
+	}
+	if rep.Verdict != VerdictDone {
+		t.Fatalf("verdict = %v, want done", rep.Verdict)
+	}
+}
+
+// With nothing fresh, the stale command is still the only thing standing
+// between the work and an unverified claim, so it must be named.
+func TestStaleCommandIsAGapWhenNothingFreshPassed(t *testing.T) {
+	rep := Build(nil, ledgerOf(
+		ran("go test ./...", true),
+		wrote("parser.go"),
+		read("parser.go"),
+	))
+	if got := gapKinds(rep); !slices.Contains(got, "stale_verification") {
+		t.Fatalf("gap kinds = %v, want the stale command named", got)
+	}
+}

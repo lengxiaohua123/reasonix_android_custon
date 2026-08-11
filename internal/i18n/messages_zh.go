@@ -13,9 +13,23 @@ var Chinese = Messages{
 	TurnCancelled:       "已取消 — 回到提示符",
 	InterruptedRecovery: "本轮已中断。部分输出会永久保留供查看；只有完整工具调用及结果和有界恢复摘要会进入模型下一轮。继续或回滚前请先检查当前工作区。",
 	RecoveryPaused:      "已暂停自动重试。Reasonix 已停止重复尝试，并保留已完成的工作。发送“继续”即可开始新一轮，也可以补充要求来调整方向。",
-	NoSessionToResume:   "没有可恢复的会话 — 用 `reasonix` 开一个新的",
-	ResumeRequiresTTY:   "--resume 需要交互式终端；用 --continue 直接恢复最近一次",
-	PickSessionLabel:    "恢复哪个会话？",
+	ReceiptVerified:     "没有未经验证的部分",
+	ReceiptGapsHeader:   "未验证:",
+	ReceiptRisksHeader:  "已申报的风险:",
+	ReceiptMore:         "另有 %d 项",
+	ReceiptGapKinds: map[string]string{
+		"unbacked_claim":      "声称过但账本不支持",
+		"unproven_criterion":  "验收项没有证据",
+		"missing_check":       "预期的检查从未通过",
+		"failed_verification": "验证失败",
+		"stale_verification":  "验证早于最后一次改动",
+		"unverified_change":   "改动了但没有任何验证",
+		"unreviewed_change":   "改动后再没看过",
+		"declared_unverified": "自己申报未验证",
+	},
+	NoSessionToResume: "没有可恢复的会话 — 用 `reasonix` 开一个新的",
+	ResumeRequiresTTY: "--resume 需要交互式终端；用 --continue 直接恢复最近一次",
+	PickSessionLabel:  "恢复哪个会话？",
 
 	ResumeBusy:          "请先完成或取消当前这一轮再恢复会话",
 	ResumeBadIndexFmt:   "请选择 1–%d 的会话（用 /resume 查看列表）",
@@ -228,6 +242,7 @@ var Chinese = Messages{
 	CmdClear:            "丢弃当前上下文",
 	CmdCls:              "清屏（保留 LLM 上下文）",
 	CmdCompact:          "压缩上下文",
+	CmdContext:          "查看上下文窗口、阈值与上次维护结果",
 	CmdRewind:           "回滚到更早的一轮",
 	CmdTree:             "查看对话分支树",
 	CmdBranch:           "创建对话分支",
@@ -262,6 +277,7 @@ var Chinese = Messages{
 	CmdMouse:            "切换鼠标接管（关闭后由终端原生处理选中/右键）",
 	CmdReasonLang:       "设置可见思考语言",
 	CmdHelp:             "查看命令列表",
+	CmdWeb:              "在 Web UI 中继续当前会话",
 	CmdTodo:             "清除任务清单",
 	CmdQuit:             "退出会话",
 	CmdCopy:             "选择回复复制到剪贴板",
@@ -317,7 +333,7 @@ var Chinese = Messages{
 	GoalPausedReason:             "用户手动暂停",
 	GoalPausedFmt:                "目标已暂停（%s）— 使用 /goal resume 继续",
 	GoalBudgetExtended:           "目标已恢复 — 追加了一档轮次数",
-	GoalRuntimeFmt:               "运行状态：轮次 %d/%d，token %d，无进展 %d/%d，追加 %d",
+	GoalRuntimeFmt:               "运行状态：轮次 %d/%d，token %d，请求 %d，无进展 %d（仅观测），追加 %d",
 	GoalRuntimeLastReason:        "最近原因",
 	ModelSwitchUnavailable:       "本会话不支持切换模型",
 	ModelSwitchBusy:              "请先完成或取消当前工作，并停止后台任务后再切换模型",
@@ -425,6 +441,7 @@ var Chinese = Messages{
 	CustomPromptBaseURL:  "请输入 Base URL",
 	CustomPromptKeyEnv:   "API Key 变量名（直接回车使用默认值，不是模型名）",
 	CustomPromptAPIKey:   "请输入 API Key",
+	CustomPromptWindow:   "上下文窗口(tokens,填得比模型真实窗口小会导致过早压缩)",
 	CustomAddedFmt:       "已添加自定义模型: %s",
 
 	// Anthropic 兼容 provider
@@ -539,6 +556,7 @@ var Chinese = Messages{
   reasonix run [--model NAME] [--max-steps N] [-c|--continue] [--resume PATH] [--copy] [--output-format FORMAT] <task>
   reasonix run --events-jsonl [--model NAME] <task>      输出脱敏结构化事件 JSONL
   reasonix review [--base BRANCH] [--commit SHA] [--model NAME]  AI 代码审查（基于本地 diff）
+  reasonix web [--model NAME] [--addr HOST:PORT] [--no-open]  启动本地 Web UI 并用默认浏览器打开
   reasonix serve [--model NAME] [--addr HOST:PORT] [--auth none|token|password] [--token STR] [--password STR] [--hash-password]  通过 HTTP+SSE 提供服务（支持可选认证）
   reasonix acp [--model NAME]                           通过 stdio 提供 Agent Client Protocol（也可用：reasonix --acp）
   reasonix setup [path]                                 交互式配置向导；生成 reasonix.toml（及 .env）
@@ -568,6 +586,7 @@ var Chinese = Messages{
   reasonix
   reasonix --continue
   reasonix --resume provider-config
+  reasonix web
   reasonix run "把 main.go 里的 TODO 实现掉"
   reasonix run --model mimo-pro "给这个函数补单元测试"
   reasonix -p "总结这个仓库" --output-format json

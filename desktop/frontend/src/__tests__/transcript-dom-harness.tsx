@@ -28,6 +28,7 @@ export interface TranscriptHarness {
   render: (items: Item[], props?: Record<string, unknown>) => Promise<void>;
   flush: () => Promise<void>;
   settle: () => Promise<void>;
+  waitFor: (condition: () => boolean, description: string, attempts?: number) => Promise<void>;
   unmount: () => Promise<void>;
   close: () => Promise<void>;
   loadModule: <T>(path: string) => Promise<T>;
@@ -66,7 +67,7 @@ export async function createTranscriptHarness(options: TranscriptHarnessOptions 
   Object.defineProperty(dom.window, "matchMedia", {
     configurable: true,
     value: () => ({
-      matches: true, // prefers-reduced-motion: keep GSAP tweens out of the assertions
+      matches: true, // prefers-reduced-motion: keep visual transitions out of the assertions
       media: "(prefers-reduced-motion: reduce)",
       onchange: null,
       addEventListener() {},
@@ -113,6 +114,13 @@ export async function createTranscriptHarness(options: TranscriptHarnessOptions 
       return 0;
     },
   });
+  Object.defineProperty(proto, "clientWidth", {
+    configurable: true,
+    get(this: HTMLElement) {
+      if (this.classList.contains("transcript")) return 800;
+      return 0;
+    },
+  });
   Object.defineProperty(proto, "scrollHeight", {
     configurable: true,
     get(this: HTMLElement) {
@@ -137,27 +145,10 @@ export async function createTranscriptHarness(options: TranscriptHarnessOptions 
     }
   };
 
-  // GSAP's CSS plugin cannot run against jsdom; the assertions are about
-  // state-driven DOM, so the animation hooks are stubbed out.
   const server = await createServer({
     appType: "custom",
     logLevel: "silent",
     server: { middlewareMode: true },
-    plugins: [
-      {
-        name: "stub-animation-hooks",
-        enforce: "pre",
-        load(id) {
-          if (id.endsWith("/src/lib/useGSAPCollapse.ts")) {
-            return "export function useGSAPCollapse() {}";
-          }
-          if (id.endsWith("/src/lib/useEntranceAnimation.ts")) {
-            return "export function useEntranceAnimation() { return { current: null }; }";
-          }
-          return undefined;
-        },
-      },
-    ],
   });
   const { Transcript } = await server.ssrLoadModule("/src/components/Transcript.tsx");
   const { LocaleProvider } = await server.ssrLoadModule("/src/lib/i18n.tsx");
@@ -184,6 +175,18 @@ export async function createTranscriptHarness(options: TranscriptHarnessOptions 
     }
   };
 
+  // Each attempt costs one 30ms flush, so the default is a three-second budget,
+  // not eight tries. It returns the moment the condition holds, so a generous
+  // cap is free on the happy path and only makes a genuine failure slower —
+  // which beats failing a correct test on a loaded runner.
+  const waitFor = async (condition: () => boolean, description: string, attempts = 100) => {
+    for (let i = 0; i < attempts; i += 1) {
+      if (condition()) return;
+      await flush();
+    }
+    if (!condition()) throw new Error(`timed out waiting for ${description}`);
+  };
+
   return {
     dom,
     container,
@@ -207,6 +210,7 @@ export async function createTranscriptHarness(options: TranscriptHarnessOptions 
     },
     flush,
     settle,
+    waitFor,
     unmount: async () => {
       const current = root;
       root = null;

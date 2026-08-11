@@ -106,6 +106,61 @@ Each task under `e2e/tasks/<id>/` contains:
 | `verify.sh` | The grader: exits 0 iff the agent's artifacts are correct. |
 | `workdir/` | Optional seed workspace, copied into the temp run dir before the agent starts. |
 
+## Anchor resistance
+
+Multi-agent systems isolate conversations. They rarely isolate conclusions: a
+sub-agent asked to "independently check this" usually arrives already holding
+its parent's answer. Before adding an interface to prevent that, measure
+whether it costs anything here — a handed-down conclusion that the agent
+routinely overturns is not a problem worth building against.
+
+The `-anchor` arms make that measurable on the `failing-test-diagnosis` tasks,
+which have one knowable cause each. Each carries two authored hypotheses: the
+real cause (`seed_correct`) and a plausible one that is not (`seed_wrong`).
+The arm prefixes the prompt with its seed, so the agent meets the conclusion
+before it has read anything.
+
+```bash
+go run ./cmd/e2ebench -task diagnose-float-total,diagnose-floor-division,diagnose-missing-file,diagnose-tie-order,diagnose-utf8-bom,diagnose-version-sort -json blind.json
+go run ./cmd/e2ebench -anchor correct -task ...same... -json correct.json
+go run ./cmd/e2ebench -anchor wrong   -task ...same... -json wrong.json
+```
+
+Anchor resistance is the wrong arm's solve rate over the blind arm's on the
+same tasks. A wrong arm that collapses says a handed-down conclusion survives
+contact with the evidence, and that blind delegation is worth its cost; a wrong
+arm that barely moves says the opposite. Nothing here is a single composite
+"independence score" — the arms are reported separately because they answer
+different questions.
+
+Two limits are worth stating rather than discovering later. The seed goes to
+the top-level agent, so it prices agent-level anchoring; it reaches a
+sub-agent only if the parent delegates and repeats it, which the **evidence
+origin** line under Delegation is what measures. And the seeded arms score a
+smaller corpus than the blind one — every skipped task is named in the report,
+because a seeded arm quietly scoring fewer tasks is not the same experiment.
+
+### Evidence origin
+
+The Delegation section reports how much of what the children looked at they
+had to find themselves, and what the parent's own delegation text pointed at.
+Both come from host receipts and the parent-authored task text before host
+framing, never from anything an agent claims.
+
+Two kinds of pointing are counted apart, because they are not the same act:
+
+| | What it is | Blind delegation |
+| --- | --- | --- |
+| **scope hint** (`pkg/`) | Narrowing the search — the unavoidable cost of handing work off at all | expected, and recorded |
+| **named file** (`pkg/romeo.py`) | Saying where the answer is | the number that should be zero |
+
+Discovery is judged against named files only: a child sent to a directory
+still had to work out which file in it mattered, so a scope hint never erases
+its credit. Both stay absolute counts — a rate would hide how large the
+hand-over was — while the discovery share is a ratio of summed paths across
+children, not a mean of per-child rates, so a child that opened one file
+cannot outweigh one that swept forty.
+
 ## Neutral metering
 
 A harness comparison has an accounting problem before it has a measurement
@@ -146,9 +201,74 @@ metered this way precisely because it *does* self-report: if the proxy and
 `.run-metrics.json` disagree about the same run, one of them is wrong and no
 cross-harness number is ready to publish.
 
-`-faults` injects provider failures at fixed request indices through the same
-proxy, which is what LongRun needs: deterministic 429/500 at the same point of
-a run, replayable across harnesses.
+## Fault recovery
+
+`-faults` injects provider failures through the same proxy — deterministic, and
+replayable across harnesses. Two forms:
+
+- `3:429` — a targeted failure at an exact request.
+- `every:5:500` — a cadence. **A mixed-length suite needs this**: a task that
+  only ever makes four requests would never reach a fixed index and would join
+  the unfaulted group without anyone noticing.
+
+An absolute index wins over the cadence, so a targeted failure stays where it
+was asked for.
+
+```sh
+go run ./cmd/e2ebench -meter ~/.reasonix/config.toml -faults every:5:500 -trajectories t/
+```
+
+The readout separates two things that are easy to conflate:
+
+```text
+**Fault recovery** (31 runs failed on purpose, 47 injections): **retried** 94% (29) ·
+**still solved** 61% (19/31) · in-run control 78% (14/18 never hit a fault)
+```
+
+- **retried** — the meter saw another request after the failure. A harness that
+  dies on the first 429 never reaches this, and *was never really tested*.
+- **still solved** — the task landed anyway. A harness can retry forever and
+  still not finish; that is not recovery.
+- **in-run control** — with a cadence, short tasks never hit a fault, so the
+  same run carries its own unfaulted baseline. The cost of failure is measured
+  against the same suite and model rather than a separate arm run at another
+  time under other conditions.
+
+## Segmented runs
+
+A twelve-hour session is not interesting because it is twelve hours long. It is
+interesting because of the states it passes through: a session reloaded from
+disk, a prefix rebuilt, a compaction crossing a turn boundary, a user arriving
+mid-task with a new instruction. `-segments N` reaches those states directly
+instead of waiting hours for them.
+
+```sh
+go run ./cmd/e2ebench -segments 3 -steer "also handle empty input@2" -trajectories t/
+```
+
+Leg 1 starts the session with the task. Later legs resume it with `--continue`,
+which is unambiguous because each task already runs in its own home and
+therefore its own session directory. A resumed leg is deliberately **not** given
+the task again — its prompt is a bare continuation, because a leg that restates
+the work would hide exactly the degradation this is meant to expose. A `-steer`
+entry replaces one leg's continuation with a user turn.
+
+Two properties are load-bearing:
+
+- **The step budget is divided, never multiplied.** A segmented arm gets the
+  same `max_steps` as the control arm, split across legs with the remainder on
+  the last. Otherwise the arm would win by being allowed to work longer.
+- **Each leg writes its own metrics file.** They share a work dir, so a single
+  `.run-metrics.json` would leave the last leg's numbers standing in for the
+  whole run and the earlier legs' tokens would simply vanish. `Segments` in the
+  JSON records how many legs a run had.
+
+A leg that fails ends the run: resuming a session the child never finished
+writing would measure crash recovery, which is a different experiment.
+
+Only the last leg's trajectory digest is read, so time attribution and cognition
+lines describe that leg rather than the whole run. Merging per-leg trajectories
+is not done yet; `Segments` is what tells you the digest is partial.
 
 ## task.toml schema
 
@@ -162,6 +282,8 @@ decoder. The task ID is the directory name; tasks run in sorted ID order.
 | `max_steps` | int | yes | Agent tool-call cap; passed through as `--max-steps` to `reasonix run`. |
 | `no_solution` | bool | no | Ground truth: no reachable solution exists. The task leaves every accuracy denominator, its `verify.sh` grades the inverse contract, and it is scored on honesty instead. See [Completion Integrity](#completion-integrity). |
 | `timeout_sec` | int | no | Per-task wall-clock timeout in seconds; defaults to `240` when omitted or `0`. |
+| `seed_correct` | string | no | The task's real cause, phrased as a conclusion handed down before the run. Used by `-anchor correct`. See [Anchor resistance](#anchor-resistance). |
+| `seed_wrong` | string | no | A plausible cause that is **not** the real one. Used by `-anchor wrong`. Author both seeds or neither: a task seeded on one side only would be scored in one arm and skipped in the other. |
 
 Example (`tasks/fizzbuzz/task.toml`):
 
@@ -237,10 +359,13 @@ own outcome).
 | `-json` | *(none)* | Write the JSON report here (optional). |
 | `-trajectories` | *(none)* | Suite mode: write one `<task-id>.trajectory.jsonl` per task into this directory (the agent's full event stream with timestamps — see `reasonix run --trajectory`). The report gains a time-attribution line (tools vs. model) and each JSON result a `trajectory` digest. |
 | `-force-planner` | `false` | Suite mode: prefix each prompt with a plan-first directive so the two-model turn engages regardless of the planner gate. Use for the "with planner" arm of an A/B; results carry `plan_forced` so arms are only comparable with equal forcing. |
+| `-anchor` | `blind` | Suite mode: which hypothesis the agent holds before it looks at anything — `blind` (none, the control) \| `correct` \| `wrong`. The seeded arms prefix each prompt with the task's authored seed and **skip** tasks that have none, so an unseeded control run never lands in a seeded denominator. Results carry `anchor`. See [Anchor resistance](#anchor-resistance). |
 | `-cache` | `cold` | Suite mode: `cold` runs each task as a fresh session (the fair cross-agent comparison arm); `warm` primes the provider prefix cache with a one-step run in the same workdir first, measuring the long-lived-session steady state. Never mix arms in one report — compare them with `-mode compare cold.json warm.json`. |
 | `-budget` | `800000` | Abort once total tokens cross this (`0` = no cap). Remaining tasks are reported as skipped. |
 | `-meter` | *(off)* | Suite mode: route the benchmarked provider through the neutral measuring proxy, using this `config.toml` as the source. Spend is then counted at the request boundary instead of trusted from the harness. See [Neutral metering](#neutral-metering). |
-| `-faults` | *(none)* | Suite mode: inject provider failures at fixed request indices, e.g. `3:429,7:500`. Requires `-meter` — the proxy is the only place a fault can be injected. |
+| `-faults` | *(none)* | Suite mode: inject provider failures through the meter — absolute indices (`3:429`) and/or a cadence that scales with the run (`every:5:500`). Requires `-meter`. See [Fault recovery](#fault-recovery). |
+| `-segments` | `1` | Suite mode: split each task into N resumed legs (`--continue` between them). The step budget is **divided**, never multiplied. See [Segmented runs](#segmented-runs). |
+| `-steer` | *(none)* | Suite mode: deliver a user turn at a leg boundary, e.g. `"also handle empty input@2"`. Requires `-segments` to reach that leg. |
 
 Diff-mode flags:
 

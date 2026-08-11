@@ -9,13 +9,13 @@ import (
 // meterSettings validates the metering flags together: a fault script has
 // nowhere to be injected without the proxy, so asking for one without -meter
 // is a mistake worth stopping for rather than silently ignoring.
-func meterSettings(configPath, faultSpec string) (string, map[int]int) {
+func meterSettings(configPath, faultSpec string) (string, faultScript) {
 	faults, err := parseFaultScript(faultSpec)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "faults:", err)
 		os.Exit(2)
 	}
-	if len(faults) > 0 && strings.TrimSpace(configPath) == "" {
+	if !faults.empty() && strings.TrimSpace(configPath) == "" {
 		fmt.Fprintln(os.Stderr, "faults: -faults needs -meter; the proxy is where a fault can be injected")
 		os.Exit(2)
 	}

@@ -36,9 +36,15 @@ type Messages struct {
 	TurnCancelled       string // shown when Ctrl-C aborts the in-flight turn but the chat keeps running
 	InterruptedRecovery string // replay notice for a durable interrupted turn
 	RecoveryPaused      string // controlled Auto retry pause; user can continue in the next message
-	NoSessionToResume   string // shown when --continue / --resume finds nothing
-	ResumeRequiresTTY   string // shown when --resume runs piped instead of on a terminal
-	PickSessionLabel    string // header on the --resume picker
+	ReceiptVerified     string // end-of-turn receipt, nothing unproven
+	ReceiptGapsHeader   string // end-of-turn receipt, header above the unproven list
+	ReceiptRisksHeader  string // end-of-turn receipt, header above declared risks
+	ReceiptMore         string // end-of-turn receipt, "and N more" tail
+	// ReceiptGapKinds maps a completion gap kind to its short human phrase.
+	ReceiptGapKinds   map[string]string
+	NoSessionToResume string // shown when --continue / --resume finds nothing
+	ResumeRequiresTTY string // shown when --resume runs piped instead of on a terminal
+	PickSessionLabel  string // header on the --resume picker
 
 	// in-chat /resume command
 	ResumeBusy          string // shown when /resume is used mid-turn
@@ -220,6 +226,7 @@ type Messages struct {
 	CmdClear            string // /clear
 	CmdCls              string // /cls
 	CmdCompact          string // /compact
+	CmdContext          string // /context
 	CmdRewind           string // /rewind
 	CmdTree             string // /tree
 	CmdBranch           string // /branch
@@ -254,6 +261,7 @@ type Messages struct {
 	CmdMouse            string // /mouse
 	CmdReasonLang       string // /reasoning-language
 	CmdHelp             string // /help
+	CmdWeb              string // /web
 	CmdTodo             string // /todo
 	CmdQuit             string // /quit (also accepts /exit as hidden alias)
 	CmdCopy             string // /copy
@@ -312,7 +320,7 @@ type Messages struct {
 	GoalPausedReason             string
 	GoalPausedFmt                string // %s = stop cause
 	GoalBudgetExtended           string
-	GoalRuntimeFmt               string // turns used/limit, tokens used, no-progress, extensions
+	GoalRuntimeFmt               string // turns used/limit, tokens, requests, observational no-progress, extensions
 	GoalRuntimeLastReason        string
 	ModelSwitchUnavailable       string
 	ModelSwitchBusy              string
@@ -465,6 +473,7 @@ type Messages struct {
 	CustomPromptBaseURL  string // "Enter Base URL"
 	CustomPromptKeyEnv   string // "Enter API Key env var name"
 	CustomPromptAPIKey   string // "Enter API Key"
+	CustomPromptWindow   string // "Enter context window in tokens"
 	CustomAddedFmt       string // "Added custom model: %s"
 
 	// Anthropic compatible provider

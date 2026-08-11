@@ -13,9 +13,23 @@ var ChineseTraditional = Messages{
 	TurnCancelled:       "已取消 — 回到提示符",
 	InterruptedRecovery: "本輪已中斷。部分輸出會永久保留供查看；只有完整工具呼叫及結果和有界恢復摘要會進入模型下一輪。繼續或回復前請先檢查目前工作區。",
 	RecoveryPaused:      "已暫停自動重試。Reasonix 已停止重複嘗試，並保留已完成的工作。傳送「繼續」即可開始新一輪，也可以補充要求來調整方向。",
-	NoSessionToResume:   "沒有可恢復的會話 — 用 `reasonix` 開一個新的",
-	ResumeRequiresTTY:   "--resume 需要互動式終端；用 --continue 直接恢復最近一次",
-	PickSessionLabel:    "恢復哪個會話？",
+	ReceiptVerified:     "沒有未經驗證的部分",
+	ReceiptGapsHeader:   "未驗證:",
+	ReceiptRisksHeader:  "已申報的風險:",
+	ReceiptMore:         "另有 %d 項",
+	ReceiptGapKinds: map[string]string{
+		"unbacked_claim":      "聲稱過但帳本不支持",
+		"unproven_criterion":  "驗收項沒有證據",
+		"missing_check":       "預期的檢查從未通過",
+		"failed_verification": "驗證失敗",
+		"stale_verification":  "驗證早於最後一次改動",
+		"unverified_change":   "改動了但沒有任何驗證",
+		"unreviewed_change":   "改動後再沒看過",
+		"declared_unverified": "自己申報未驗證",
+	},
+	NoSessionToResume: "沒有可恢復的會話 — 用 `reasonix` 開一個新的",
+	ResumeRequiresTTY: "--resume 需要互動式終端；用 --continue 直接恢復最近一次",
+	PickSessionLabel:  "恢復哪個會話？",
 
 	ResumeBusy:             "請先完成或取消當前這一輪再恢復會話",
 	ResumeBadIndexFmt:      "請選擇 1–%d 的會話（用 /resume 檢視列表）",
@@ -217,6 +231,7 @@ var ChineseTraditional = Messages{
 	CmdNew:              "清空上下文並儲存歷史",
 	CmdCls:              "清除畫面（保留 LLM 上下文）",
 	CmdCompact:          "壓縮上下文",
+	CmdContext:          "檢視上下文視窗、閾值與上次維護結果",
 	CmdRewind:           "回滾到更早的一輪",
 	CmdTree:             "檢視對話分支樹",
 	CmdBranch:           "建立對話分支",
@@ -248,6 +263,7 @@ var ChineseTraditional = Messages{
 	CmdMouse:            "切換滑鼠接管（關閉後由終端原生處理選取/右鍵）",
 	CmdReasonLang:       "設定可見思考語言",
 	CmdHelp:             "檢視命令列表",
+	CmdWeb:              "在 Web UI 中繼續目前工作階段",
 	CmdTodo:             "清除任務清單",
 	CmdQuit:             "退出會話",
 	CmdCopy:             "選擇回覆複製到剪貼簿",
@@ -397,6 +413,7 @@ var ChineseTraditional = Messages{
 	CustomPromptBaseURL:  "請輸入 Base URL",
 	CustomPromptKeyEnv:   "API Key 變數名稱（直接按 Enter 使用預設值，不是模型名稱）",
 	CustomPromptAPIKey:   "請輸入 API Key",
+	CustomPromptWindow:   "上下文視窗(tokens,填得比模型真實視窗小會導致過早壓縮)",
 	CustomAddedFmt:       "已新增自訂模型: %s",
 
 	// Anthropic 相容 provider
@@ -478,6 +495,7 @@ var ChineseTraditional = Messages{
   reasonix run [--model NAME] [--max-steps N] [-c|--continue] [--resume PATH] [--copy] [--output-format FORMAT] <task>
   reasonix run --events-jsonl [--model NAME] <task>      輸出脫敏結構化事件 JSONL
   reasonix review [--base BRANCH] [--commit SHA] [--model NAME]  AI 程式碼審查（基於本機 diff）
+  reasonix web [--model NAME] [--addr HOST:PORT] [--no-open]  啟動本機 Web UI 並用預設瀏覽器開啟
   reasonix serve [--model NAME] [--addr HOST:PORT] [--auth none|token|password] [--token STR] [--password STR] [--hash-password]  透過 HTTP+SSE 提供服務（支援可選認證）
   reasonix acp [--model NAME]                           透過 stdio 提供 Agent Client Protocol（也可用：reasonix --acp）
   reasonix setup [path]                                 互動式設定精靈；生成 reasonix.toml（及 .env）
@@ -507,6 +525,7 @@ var ChineseTraditional = Messages{
   reasonix
   reasonix --continue
   reasonix --resume provider-config
+  reasonix web
   reasonix run "把 main.go 裡的 TODO 實現掉"
   reasonix run --model mimo-pro "給這個函式補單元測試"
   reasonix -p "總結這個倉庫" --output-format json
@@ -543,7 +562,7 @@ var ChineseTraditional = Messages{
 	GoalPausedReason:           "使用者手動暫停",
 	GoalPausedFmt:              "目標已暫停（%s）— 使用 /goal resume 繼續",
 	GoalBudgetExtended:         "目標已恢復 — 追加了一檔輪次數",
-	GoalRuntimeFmt:             "執行狀態：輪次 %d/%d，token %d，無進展 %d/%d，追加 %d",
+	GoalRuntimeFmt:             "執行狀態：輪次 %d/%d，token %d，請求 %d，無進展 %d（僅觀測），追加 %d",
 	GoalRuntimeLastReason:      "最近原因",
 	ProviderErrAuthRejected:    "認證失敗 (HTTP 401)：服務端拒絕了你的 API key。可能是 key 錯誤或已過期，也可能是服務端出現瞬時鑑權/額度問題——已退避重試仍失敗。請稍後再試，或檢查 .env 中的金鑰 / 執行 `reasonix setup`。",
 	SelectMoreAboveFmt:         "  ↑ 上方還有 %d 個",

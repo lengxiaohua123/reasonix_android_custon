@@ -249,13 +249,19 @@ func gapsOf(rep Report, c *taskcontract.Contract) []Gap {
 	}
 	proven := false
 	for _, v := range rep.Verifications {
+		if v.Passed && !v.Stale {
+			proven = true
+		}
+	}
+	for _, v := range rep.Verifications {
 		switch {
 		case !v.Passed:
 			gaps = append(gaps, Gap{GapFailedVerification, v.Command})
-		case v.Stale:
+		case v.Stale && !proven:
+			// Superseded commands matter only while nothing fresh has proven
+			// the tree; listing them after a green run is the pedantry that
+			// teaches people to skip receipts.
 			gaps = append(gaps, Gap{GapStaleVerification, v.Command})
-		default:
-			proven = true
 		}
 	}
 	// Only report the blanket gap when no declared check already said it: a

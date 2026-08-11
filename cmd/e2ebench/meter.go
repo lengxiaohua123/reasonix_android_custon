@@ -23,9 +23,10 @@ import (
 type meter struct {
 	upstream *url.URL
 	client   *http.Client
-	faults   map[int]int // 1-based request index -> status to return instead
+	faults   faultScript
 
-	mu sync.Mutex
+	mu        sync.Mutex
+	lastFault int
 	meterUsage
 }
 
@@ -40,35 +41,80 @@ type meterUsage struct {
 	CacheMissTokens  int `json:"cache_miss_tokens"`
 	Injected         int `json:"injected_faults,omitempty"`
 	WithoutUsage     int `json:"responses_without_usage,omitempty"`
+	// RequestsAfterFault counts requests issued after the first injected
+	// failure: the harness's own evidence that it retried rather than died.
+	RequestsAfterFault int `json:"requests_after_fault,omitempty"`
 }
 
-// parseFaultScript reads "3:429,7:500" — inject that status instead of
-// forwarding the Nth request. Deterministic by index so a LongRun arm replays
-// the same failures across harnesses.
-func parseFaultScript(spec string) (map[int]int, error) {
-	if strings.TrimSpace(spec) == "" {
-		return nil, nil
+// faultScript decides which requests fail. Absolute indices pin a failure to
+// an exact point; a cadence scales with the run, which is what a mixed-length
+// suite needs — a task that only ever makes four requests would never reach a
+// fixed index, and would silently join the unfaulted control group.
+type faultScript struct {
+	at          map[int]int // 1-based request index -> status
+	everyN      int
+	everyStatus int
+}
+
+func (f faultScript) empty() bool { return len(f.at) == 0 && f.everyN == 0 }
+
+// statusFor reports the status to inject instead of forwarding. An absolute
+// index wins over the cadence so a targeted failure stays exactly where it was
+// asked for.
+func (f faultScript) statusFor(index int) (int, bool) {
+	if status, ok := f.at[index]; ok {
+		return status, true
 	}
-	out := map[int]int{}
+	if f.everyN > 0 && index%f.everyN == 0 {
+		return f.everyStatus, true
+	}
+	return 0, false
+}
+
+// parseFaultScript reads "3:429,every:5:500": fail the 3rd request with 429 and
+// every 5th with 500. Deterministic either way, so a LongRun arm replays the
+// same failures across harnesses.
+func parseFaultScript(spec string) (faultScript, error) {
+	out := faultScript{at: map[int]int{}}
+	if strings.TrimSpace(spec) == "" {
+		return faultScript{}, nil
+	}
 	for field := range strings.SplitSeq(spec, ",") {
-		idx, status, ok := strings.Cut(strings.TrimSpace(field), ":")
-		if !ok {
-			return nil, fmt.Errorf("fault %q: want <request-index>:<status>", field)
+		field = strings.TrimSpace(field)
+		if rest, ok := strings.CutPrefix(field, "every:"); ok {
+			n, status, err := parseFaultPair(field, rest)
+			if err != nil {
+				return faultScript{}, err
+			}
+			out.everyN, out.everyStatus = n, status
+			continue
 		}
-		i, err := strconv.Atoi(strings.TrimSpace(idx))
-		if err != nil || i < 1 {
-			return nil, fmt.Errorf("fault %q: request index must be a positive integer", field)
+		index, status, err := parseFaultPair(field, field)
+		if err != nil {
+			return faultScript{}, err
 		}
-		code, err := strconv.Atoi(strings.TrimSpace(status))
-		if err != nil || code < 400 || code > 599 {
-			return nil, fmt.Errorf("fault %q: status must be 4xx or 5xx", field)
-		}
-		out[i] = code
+		out.at[index] = status
 	}
 	return out, nil
 }
 
-func newMeter(upstream string, faults map[int]int) (*meter, error) {
+func parseFaultPair(field, pair string) (n, status int, err error) {
+	left, right, ok := strings.Cut(pair, ":")
+	if !ok {
+		return 0, 0, fmt.Errorf("fault %q: want <request-index>:<status> or every:<n>:<status>", field)
+	}
+	n, err = strconv.Atoi(strings.TrimSpace(left))
+	if err != nil || n < 1 {
+		return 0, 0, fmt.Errorf("fault %q: the request count must be a positive integer", field)
+	}
+	status, err = strconv.Atoi(strings.TrimSpace(right))
+	if err != nil || status < 400 || status > 599 {
+		return 0, 0, fmt.Errorf("fault %q: status must be 4xx or 5xx", field)
+	}
+	return n, status, nil
+}
+
+func newMeter(upstream string, faults faultScript) (*meter, error) {
 	u, err := url.Parse(strings.TrimSuffix(strings.TrimSpace(upstream), "/"))
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return nil, fmt.Errorf("meter upstream %q is not an absolute URL", upstream)
@@ -98,9 +144,16 @@ func (m *meter) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	m.mu.Lock()
 	m.Requests++
 	index := m.Requests
-	status, faulted := m.faults[index]
-	if faulted {
+	status, faulted := m.faults.statusFor(index)
+	switch {
+	case faulted:
 		m.Injected++
+		m.lastFault = index
+	case m.lastFault > 0:
+		// Evidence the harness kept going after being failed. A harness that
+		// gives up on the first 429 never reaches here, and that is the
+		// difference between "recovered" and "was never really tested".
+		m.RequestsAfterFault++
 	}
 	m.mu.Unlock()
 

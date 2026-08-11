@@ -70,16 +70,17 @@ if (localeChunks.length !== 2) {
 for (const path of localeChunks) {
   const name = basename(path);
   // Task Monitor, Extension UI, Storage & paths, and shell execution cards
-  // add their own labels. Reasoning summaries and status bar metrics add the
-  // latest localized copy. Keep both dictionaries within narrow allowances.
-  const budget = name.startsWith("zh-TW-") ? 54 * 1024 : 53.25 * 1024;
+  // add their own labels. Reasoning display controls and status bar metrics add
+  // the latest localized copy. Keep both dictionaries within narrow allowances.
+  const budget = name.startsWith("zh-TW-") ? 54.7 * 1024 : 53.9 * 1024;
   assertBudget(`${name} gzip`, gzipBytes(path), budget);
 }
 
 const rawInitialBytes = [...initialJS, ...initialCSS, ...appShellCSS]
   .reduce((total, path) => total + statSync(path).size, 0);
-// Native Web Animations and frame-batched scrolling keep GSAP out of the eager
-// graph. Preserve the resulting startup headroom instead of letting the shell
-// drift back to the previous 2.27 MiB / 295 KiB-gzip edge.
-assertBudget("initial raw JavaScript and CSS", rawInitialBytes, 2_200 * 1024);
+// Native Web Animations and frame-batched scrolling avoid an eager animation
+// runtime. Goal request observability plus transcript scroll arbitration,
+// logical selection state/DOM adapters, and measurement invalidation add small
+// always-available contracts; keep raw allowance tight while gzip stays flat.
+assertBudget("initial raw JavaScript and CSS", rawInitialBytes, 2_240 * 1024);
 assertBudget("largest initial JavaScript chunk raw", largestInitialJSRaw, 1_000 * 1024);

@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-func meterAgainst(t *testing.T, upstream http.Handler, faults map[int]int) (*meter, string, func()) {
+func meterAgainst(t *testing.T, upstream http.Handler, faults faultScript) (*meter, string, func()) {
 	t.Helper()
 	up := httptest.NewServer(upstream)
 	m, err := newMeter(up.URL, faults)
@@ -38,7 +38,7 @@ func TestMeterCountsNonStreamingUsage(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":100,"completion_tokens":20,"prompt_cache_hit_tokens":64,"prompt_cache_miss_tokens":36}}`)
 	})
-	m, base, stop := meterAgainst(t, upstream, nil)
+	m, base, stop := meterAgainst(t, upstream, faultScript{})
 	defer stop()
 
 	resp := post(t, base, "/chat/completions", `{"model":"x"}`)
@@ -64,7 +64,7 @@ func TestMeterReadsOpenAICachedTokensSpelling(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"usage":{"prompt_tokens":90,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":30}}}`)
 	})
-	m, base, stop := meterAgainst(t, upstream, nil)
+	m, base, stop := meterAgainst(t, upstream, faultScript{})
 	defer stop()
 	post(t, base, "/chat/completions", `{"model":"x"}`).Body.Close()
 
@@ -81,7 +81,7 @@ func TestMeterCountsStreamedUsageAndForwardsFrames(t *testing.T) {
 		io.WriteString(w, "data: {\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}\n\n")
 		io.WriteString(w, "data: [DONE]\n\n")
 	})
-	m, base, stop := meterAgainst(t, upstream, nil)
+	m, base, stop := meterAgainst(t, upstream, faultScript{})
 	defer stop()
 
 	resp := post(t, base, "/chat/completions", `{"model":"x","stream":true}`)
@@ -104,7 +104,7 @@ func TestMeterOptsStreamedRequestsIntoUsage(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		io.WriteString(w, "data: [DONE]\n\n")
 	})
-	_, base, stop := meterAgainst(t, upstream, nil)
+	_, base, stop := meterAgainst(t, upstream, faultScript{})
 	defer stop()
 	post(t, base, "/chat/completions", `{"model":"x","stream":true}`).Body.Close()
 
@@ -125,7 +125,7 @@ func TestMeterLeavesNonStreamedRequestsAlone(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
 	})
-	_, base, stop := meterAgainst(t, upstream, nil)
+	_, base, stop := meterAgainst(t, upstream, faultScript{})
 	defer stop()
 	post(t, base, "/chat/completions", `{"model":"x"}`).Body.Close()
 
@@ -139,7 +139,7 @@ func TestMeterReportsResponsesWithoutUsage(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"choices":[]}`)
 	})
-	m, base, stop := meterAgainst(t, upstream, nil)
+	m, base, stop := meterAgainst(t, upstream, faultScript{})
 	defer stop()
 	post(t, base, "/chat/completions", `{"model":"x"}`).Body.Close()
 
@@ -155,7 +155,7 @@ func TestMeterInjectsFaultsByRequestIndex(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
 	})
-	m, base, stop := meterAgainst(t, upstream, map[int]int{2: 429})
+	m, base, stop := meterAgainst(t, upstream, faultScript{at: map[int]int{2: 429}})
 	defer stop()
 
 	for i := range 3 {
@@ -182,10 +182,10 @@ func TestParseFaultScript(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
-	if got[3] != 429 || got[7] != 500 || len(got) != 2 {
+	if got.at[3] != 429 || got.at[7] != 500 || len(got.at) != 2 {
 		t.Fatalf("faults = %v", got)
 	}
-	if got, err := parseFaultScript(""); err != nil || got != nil {
+	if got, err := parseFaultScript(""); err != nil || !got.empty() {
 		t.Fatalf("empty spec = %v, %v", got, err)
 	}
 	for _, bad := range []string{"3", "0:429", "3:200", "x:429", "3:999"} {
@@ -196,7 +196,15 @@ func TestParseFaultScript(t *testing.T) {
 }
 
 func TestNewMeterRejectsRelativeUpstream(t *testing.T) {
-	if _, err := newMeter("/v1", nil); err == nil {
+	if _, err := newMeter("/v1", faultScript{}); err == nil {
 		t.Fatal("a relative upstream must be rejected")
 	}
+}
+
+// okUpstream is a minimal usage-reporting upstream for fault tests.
+func okUpstream() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	})
 }
