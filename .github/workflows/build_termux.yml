@@ -69,6 +69,8 @@ jobs:
           }
 
           termux_step_post_make_install() {
+              # 安装到 Termux prefix,否则 .deb 为空报 "No files in package"
+              install -Dm755 $TERMUX_PKG_SRCDIR/bin/reasonix $TERMUX_PREFIX/bin/reasonix
               # 把二进制复制到挂载目录,跳过 .deb 打包也能拿到文件
               cp $TERMUX_PKG_SRCDIR/bin/reasonix /home/builder/termux-packages/output-bin/reasonix-${TERMUX_ARCH}
           }
