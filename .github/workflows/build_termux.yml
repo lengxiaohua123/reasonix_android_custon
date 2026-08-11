@@ -62,6 +62,12 @@ jobs:
               make build VERSION="$TERMUX_PKG_VERSION"
           }
 
+          termux_step_make_install() {
+              # reasonix 的 Makefile 没有 install target;
+              # 产物由 termux_step_post_make_install 直接复制,这里跳过。
+              :
+          }
+
           termux_step_post_make_install() {
               # 把二进制复制到挂载目录,跳过 .deb 打包也能拿到文件
               cp $TERMUX_PKG_SRCDIR/bin/reasonix /home/builder/termux-packages/output-bin/reasonix-${TERMUX_ARCH}
