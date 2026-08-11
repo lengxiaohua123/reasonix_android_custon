@@ -1,0 +1,66 @@
+name: Build Reasonix Binary for Termux
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clone termux-packages
+        run: git clone --depth=1 https://github.com/termux/termux-packages.git
+
+      - name: Create output directory
+        run: mkdir -p termux-packages/output-bin
+
+      - name: Create Reasonix build script
+        run: |
+          mkdir -p termux-packages/packages/reasonix
+          cat > termux-packages/packages/reasonix/build.sh << 'EOF'
+          TERMUX_PKG_HOMEPAGE="https://github.com/lengxiaohua123/reasonix_android_custon"
+          TERMUX_PKG_DESCRIPTION="DeepSeek-native AI coding agent (Termux build)"
+          TERMUX_PKG_LICENSE="MIT"
+          TERMUX_PKG_MAINTAINER="@lengxiaohua123"
+          # 版本与仓库源码保持一致;升级上游 tag 并重新适配补丁后,同步改这里。
+          TERMUX_PKG_VERSION="1.23.0"
+          # 直接编译本仓库 master(已含 Termux 适配补丁)。
+          # 不拉上游最新代码,防止补丁与上游新 tag 冲突打不上。
+          TERMUX_PKG_SRCURL="https://github.com/lengxiaohua123/reasonix_android_custon.git"
+          TERMUX_PKG_GIT_BRANCH="master"
+          TERMUX_PKG_BUILD_IN_SRC=true
+          TERMUX_PKG_BUILD_DEPENDS="golang"
+
+          termux_step_pre_configure() {
+              export GOPATH=$TERMUX_PKG_BUILDDIR/go
+              export GOCACHE=$TERMUX_PKG_BUILDDIR/go-cache
+              export GOMODCACHE=$GOPATH/pkg/mod
+              mkdir -p $GOPATH $GOCACHE $GOMODCACHE
+          }
+
+          termux_step_make() {
+              # builder 容器是 ubuntu,显式按 Termux 目标架构编译;
+              # Makefile build 用 CGO_ENABLED=0,产物为纯静态 ELF。
+              export GOOS=android
+              export GOARCH=$TERMUX_ARCH
+              if declare -f termux_setup_golang >/dev/null; then
+                  termux_setup_golang
+              fi
+              # 仓库无 tag,git describe 只会给 hash,显式注入版本号。
+              make build VERSION="$TERMUX_PKG_VERSION"
+          }
+
+          termux_step_post_make_install() {
+              # 把二进制复制到挂载目录,跳过 .deb 打包也能拿到文件
+              cp $TERMUX_PKG_SRCDIR/bin/reasonix /home/builder/termux-packages/output-bin/reasonix-${TERMUX_ARCH}
+          }
+          EOF
+
+      - name: Build in Termux Docker (non-root)
+        run: |
+          cd termux-packages
+          ./scripts/run-docker.sh ./build-package.sh -f -I reasonix
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: reasonix-binary
+          path: termux-packages/output-bin/reasonix-*
