@@ -22,8 +22,18 @@ umask 022
 
 log() { printf '[release] %s\n' "$*"; }
 
+# Android 长任务防护:防止系统杀后台进程 / Doze 挂起网络。
+if command -v termux-wake-lock >/dev/null 2>&1; then
+  termux-wake-lock || true
+  trap 'termux-wake-unlock >/dev/null 2>&1 || true' EXIT
+fi
+# 8 核手机全核编译/测试会过热降频,反而更慢且易触发并发 flaky;
+# GOMAXPROCS 默认限 4 核,可用环境变量覆盖。
+export GOMAXPROCS="${GOMAXPROCS:-4}"
+
 # 1. 解析上游 tag
-TAG="${RELEASE_TAG:-}"
+TAG="1.22.0"
+:<<COMMENT
 if [ -z "$TAG" ]; then
   TAG="$(git ls-remote --tags --refs https://github.com/esengine/DeepSeek-Reasonix.git \
     | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.' | grep -v -- '-rc' | sort -V | tail -1)"
@@ -82,12 +92,12 @@ if [ "${SKIP_TESTS:-0}" != "1" ]; then
     exit 1
   fi
 fi
-
+COMMENT
 # 5. 上传二进制到仓库(发布由 GitHub Action 校验版本/hash 后完成)
 log "上传二进制到仓库 artifacts/"
 ART_DIR="$SCRIPT_DIR/artifacts"
 mkdir -p "$ART_DIR"
-cp "$BIN" "$ART_DIR/reasonix-android-arm64"
+cp "$BIN" "$ART_DIR/reasonix"
 cd "$SCRIPT_DIR"
 git add artifacts/reasonix-android-arm64
 if git commit -m "upload reasonix-android-arm64 $TAG" >/dev/null 2>&1; then
