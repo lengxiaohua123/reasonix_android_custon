@@ -6,6 +6,15 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version from releases.json
+        id: version
+        run: |
+          VERSION="$(python3 -c "import json;print(json.load(open('release-notes/releases.json'))['releases'][0]['version'])")"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved reasonix version: $VERSION"
+
       - name: Clone termux-packages
         run: git clone --depth=1 https://github.com/termux/termux-packages.git
 
@@ -20,8 +29,7 @@ jobs:
           TERMUX_PKG_DESCRIPTION="DeepSeek-native AI coding agent (Termux build)"
           TERMUX_PKG_LICENSE="MIT"
           TERMUX_PKG_MAINTAINER="@lengxiaohua123"
-          # 版本与仓库源码保持一致;升级上游 tag 并重新适配补丁后,同步改这里。
-          TERMUX_PKG_VERSION="1.23.0"
+          TERMUX_PKG_VERSION="${{ steps.version.outputs.version }}"
           # 直接编译本仓库 master(已含 Termux 适配补丁)。
           # 不拉上游最新代码,防止补丁与上游新 tag 冲突打不上。
           # 用 codeload tar.gz(termux-packages 对 .git URL 无 git 特判,会解压失败)。
@@ -38,12 +46,18 @@ jobs:
 
           termux_step_make() {
               # builder 容器是 ubuntu,显式按 Termux 目标架构编译;
-              # Makefile build 用 CGO_ENABLED=0,产物为纯静态 ELF。
+              # termux-packages 用 aarch64/i686/x86_64 命名,映射到 Go 的 GOARCH。
               export GOOS=android
-              export GOARCH=$TERMUX_ARCH
+              case "$TERMUX_ARCH" in
+                aarch64) export GOARCH=arm64 ;;
+                arm)     export GOARCH=arm ;;
+                i686)    export GOARCH=386 ;;
+                x86_64)  export GOARCH=amd64 ;;
+              esac
               if declare -f termux_setup_golang >/dev/null; then
                   termux_setup_golang
               fi
+              # Makefile build 用 CGO_ENABLED=0,产物为纯静态 ELF;
               # 仓库无 tag,git describe 只会给 hash,显式注入版本号。
               make build VERSION="$TERMUX_PKG_VERSION"
           }
