@@ -1,23 +1,21 @@
 #!/usr/bin/env bash
-# release-termux.sh — 在 Termux 本地编译、测试 Reasonix,并把编译好的二进制
-# 上传到本仓库 artifacts/(GitHub Action verify-and-release.yml 校验版本与
+# release-termux.sh — 在本仓库(Termux)直接编译、测试 Reasonix,并把编译好的
+# 二进制上传到 artifacts/(GitHub Action verify-and-release.yml 校验版本与
 # 上游最新 tag 一致后自动创建 release)。
 #
-# 前置:源码已就绪(先运行 ./update-reasonix.sh),本仓库可 push(SSH key)。
+# 前置:仓库 master 已是最新源码+补丁(运行 ./update-reasonix.sh 升级),
+#       本仓库可 push(SSH key)。
 #
 # 用法:
-#   ./release-termux.sh [patch文件]
+#   ./release-termux.sh
 # 环境变量:
-#   RELEASE_TAG       指定上游 tag(默认取上游最新正式版 tag)
-#   REASONIX_WORKDIR  源码工作目录(默认 $HOME/reasonix-src)
+#   RELEASE_TAG       指定版本号(默认从 release-notes/releases.json 提取)
 #   SKIP_TESTS=1      跳过测试
 #   FAIL_ON_TEST=1    测试失败时中止(默认仅报告,Termux 已知环境性失败不阻塞)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO="${RELEASE_REPO:-lengxiaohua123/reasonix_android_custon}"
-WORKDIR="${REASONIX_WORKDIR:-$HOME/reasonix-src}"
-PATCH_FILE="$(realpath "${1:-$SCRIPT_DIR/reasonix-termux.patch}")"
 umask 022
 
 log() { printf '[release] %s\n' "$*"; }
@@ -31,27 +29,16 @@ fi
 # GOMAXPROCS 默认限 4 核,可用环境变量覆盖。
 export GOMAXPROCS="${GOMAXPROCS:-4}"
 
-# 1. 解析上游 tag
-TAG="$(git ls-remote --tags --refs https://github.com/esengine/DeepSeek-Reasonix.git \
-    | awk -F/ '{print $NF}' | grep -E '^v[0-9]+\.' | grep -v -- '-rc' | sort -V | tail -1)"
+# 1. 解析版本:仓库源码即该版本+补丁(releases.json 随上游源码同步)
+TAG="${RELEASE_TAG:-v$(python3 -c "import json;print(json.load(open('$SCRIPT_DIR/release-notes/releases.json'))['releases'][0]['version'])" 2>/dev/null || echo 0)}"
 REL_TAG="termux-$TAG"
-log "上游 tag: $TAG → release: $REL_TAG"
+log "版本: $TAG → release: $REL_TAG"
 
-# 2. 校验源码就绪
-if [ ! -d "$WORKDIR/.git" ]; then
-  echo "[release] 错误: $WORKDIR 不是 git 仓库,请先运行 ./update-reasonix.sh" >&2
-  exit 1
-fi
-cd "$WORKDIR"
-if ! git describe --tags --always | grep -q "$TAG"; then
-  echo "[release] 错误: $WORKDIR 不是 $TAG(当前 $(git describe --tags --always 2>/dev/null));请先运行 ./update-reasonix.sh" >&2
-  exit 1
-fi
-
-# 3. 编译
+# 2. 编译(源码就在本仓库,已含 Termux 补丁)
 log "编译 android 二进制"
+cd "$SCRIPT_DIR"
 make android VERSION="$TAG"
-BIN="$WORKDIR/bin/reasonix-android-arm64"
+BIN="$SCRIPT_DIR/bin/reasonix-android-arm64"
 [ -f "$BIN" ] || { echo "[release] 编译产物缺失: $BIN" >&2; exit 1; }
 log "产物: $BIN ($(stat -c%s "$BIN") bytes)"
 
