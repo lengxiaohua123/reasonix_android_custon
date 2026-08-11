@@ -24,8 +24,8 @@ jobs:
           TERMUX_PKG_VERSION="1.23.0"
           # 直接编译本仓库 master(已含 Termux 适配补丁)。
           # 不拉上游最新代码,防止补丁与上游新 tag 冲突打不上。
-          TERMUX_PKG_SRCURL="https://github.com/lengxiaohua123/reasonix_android_custon.git"
-          TERMUX_PKG_GIT_BRANCH="master"
+          # 用 codeload tar.gz(termux-packages 对 .git URL 无 git 特判,会解压失败)。
+          TERMUX_PKG_SRCURL="https://codeload.github.com/lengxiaohua123/reasonix_android_custon/tar.gz/refs/heads/master"
           TERMUX_PKG_BUILD_IN_SRC=true
           TERMUX_PKG_BUILD_DEPENDS="golang"
 
