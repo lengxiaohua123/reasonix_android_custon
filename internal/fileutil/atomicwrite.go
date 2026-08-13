@@ -3,7 +3,6 @@ package fileutil
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -122,41 +121,9 @@ func AtomicCreateFile(path string, data []byte, perm os.FileMode) error {
 	}
 	defer os.Remove(tmpPath)
 	if err := os.Link(tmpPath, path); err != nil {
-		// Android (Termux) denies hard links; fall back to an exclusive
-		// copy that keeps the no-replace guarantee. An existing target
-		// still fails (O_EXCL), matching the link's EEXIST contract.
-		if !errors.Is(err, syscall.EPERM) && !errors.Is(err, syscall.EACCES) {
-			return fmt.Errorf("publish new file %s: %w", path, err)
-		}
-		if err := publishCopyNoReplace(tmpPath, path); err != nil {
-			return fmt.Errorf("publish new file %s: %w", path, err)
-		}
+		return fmt.Errorf("publish new file %s: %w", path, err)
 	}
 	return nil
-}
-
-// publishCopyNoReplace copies src to dst without overwriting an existing dst;
-// it is the hard-link fallback for filesystems that deny links (Android).
-func publishCopyNoReplace(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	info, err := in.Stat()
-	if err != nil {
-		return err
-	}
-	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-	if err != nil {
-		return err
-	}
-	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
-		os.Remove(dst)
-		return err
-	}
-	return out.Close()
 }
 
 // AtomicOverwriteFile replaces an existing file's contents atomically while
@@ -249,6 +216,15 @@ func writeAtomicTemp(path string, data []byte, perm os.FileMode) (string, error)
 func ReplaceFile(tmp, dest string) error {
 	Crash("replace", dest)
 	return replaceFile(tmp, dest, true)
+}
+
+// ClaimRename renames src to dst for callers that use the rename itself as a
+// claim: it retries the same transient locks ReplaceFile does, but never falls
+// back to a copy, because a copy would let two claimants both succeed. A src
+// that has disappeared ends the retries at once — that is the loser of a race,
+// not a fault.
+func ClaimRename(src, dst string) error {
+	return replaceFile(src, dst, false)
 }
 
 func replaceFile(tmp, dest string, allowCrossDeviceCopy bool) error {

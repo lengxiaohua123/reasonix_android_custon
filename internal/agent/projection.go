@@ -142,6 +142,8 @@ type CompactionTelemetry struct {
 	FoldTokens        int    `json:"fold_tokens"` // summarizer input after any shortening
 	Spans             int    `json:"spans"`       // summarizer calls the fold needed; 1 unless it was split
 	ProjectionTokens  int    `json:"projection_tokens"`
+	UserTurnsKept     int    `json:"user_turns_kept"`
+	UserTurnsDropped  int    `json:"user_turns_dropped"` // past the retention budget, now summary-only
 	InputTokens       int    `json:"input_tokens"`
 	OutputTokens      int    `json:"output_tokens"`
 	CacheHitTokens    int    `json:"cache_hit_tokens"`
@@ -315,15 +317,25 @@ func projectionValid(st CompactionState, msgs []provider.Message, transcriptVers
 	if len(st.Projection.Messages) == 0 {
 		return false
 	}
-	n := st.Projection.CoveredCount
-	if n <= 0 || n > len(msgs) {
-		return false
-	}
 	// Current lineage known: stored key must match (legacy native suffix ok).
 	if cacheKey != "" {
 		if _, ok := lineageKeyCompatible(st.PromptCacheKey, cacheKey); !ok {
 			return false
 		}
+	}
+	return projectionContentValid(st, msgs, transcriptVersion)
+}
+
+// projectionContentValid reports whether st's projection body still matches the
+// canonical transcript, independent of provider/model lineage. LoadProjectionSidecar
+// uses it to rebind across upgrade/model/workspace key changes.
+func projectionContentValid(st CompactionState, msgs []provider.Message, transcriptVersion uint64) bool {
+	if len(st.Projection.Messages) == 0 {
+		return false
+	}
+	n := st.Projection.CoveredCount
+	if n <= 0 || n > len(msgs) {
+		return false
 	}
 	// Prefix hash is required; legacy sidecars without it are rebuilt.
 	if st.Projection.CoveredPrefixHash == "" {
