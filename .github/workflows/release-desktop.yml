@@ -311,7 +311,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: "24"
-      - uses: pnpm/action-setup@v6.0.9
+      - uses: pnpm/action-setup@v6.1.0
         with:
           version: 10
 
@@ -437,7 +437,7 @@ jobs:
       - name: Submit Windows payload for Authenticode signing
         if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
         id: submit-windows-payload
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
@@ -499,7 +499,7 @@ jobs:
       - name: Submit installer for Authenticode signing
         if: runner.os == 'Windows' && env.HAS_SIGNPATH == 'true'
         id: submit-windows-installer
-        uses: signpath/github-action-submit-signing-request@v2
+        uses: signpath/github-action-submit-signing-request@v3
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ secrets.SIGNPATH_ORGANIZATION_ID }}
