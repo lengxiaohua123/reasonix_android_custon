@@ -1,6 +1,6 @@
 module reasonix/desktop
 
-go 1.25.0
+go 1.26.0
 
 toolchain go1.26.5
 
@@ -18,15 +18,15 @@ require (
 	github.com/creack/pty v1.1.24
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/go-ole/go-ole v1.3.0
-	github.com/godbus/dbus/v5 v5.2.2
+	github.com/godbus/dbus/v5 v5.2.4
 	github.com/tc-hib/winres v0.3.1
 	github.com/wailsapp/go-webview2 v1.0.23
-	github.com/wailsapp/wails/v2 v2.13.0
-	golang.org/x/image v0.44.0
-	golang.org/x/mod v0.38.0
-	golang.org/x/sync v0.22.0
-	golang.org/x/sys v0.47.0
-	golang.org/x/text v0.40.0
+	github.com/wailsapp/wails/v2 v2.16.0
+	golang.org/x/image v0.47.0
+	golang.org/x/mod v0.41.0
+	golang.org/x/sync v0.24.0
+	golang.org/x/sys v0.49.0
+	golang.org/x/text v0.43.0
 )
 
 require (
